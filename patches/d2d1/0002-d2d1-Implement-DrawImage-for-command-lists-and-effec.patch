@@ -1,0 +1,463 @@
+From e99de8b1324d13740f07a038e2e79edb44570045 Mon Sep 17 00:00:00 2001
+From: maebahesioru <maebahesioru@users.noreply.github.com>
+Date: Sat, 17 Oct 2026 10:17:45 +0900
+Subject: [PATCH 2/5] d2d1: Implement DrawImage() for command lists and effect
+ images.
+
+Replay recorded command lists onto the target through an ID2D1CommandSink
+implementation that forwards the recorded commands to the device context,
+applying the target offset as a translation.
+
+Effect images are rendered by recursing into input 0 and applying the
+properties of the standard transform and crop effects.  Flood, shadow
+and color matrix effects are not rendered yet.
+---
+ dlls/d2d1/device.c | 416 +++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 416 insertions(+)
+
+diff --git a/dlls/d2d1/device.c b/dlls/d2d1/device.c
+index 687b76ce..20a2f48d 100644
+--- a/dlls/d2d1/device.c
++++ b/dlls/d2d1/device.c
+@@ -2717,12 +2717,320 @@ static void STDMETHODCALLTYPE d2d_device_context_ID2D1DeviceContext_DrawGlyphRun
+     d2d_device_context_draw_glyph_run(context, baseline_origin, glyph_run, glyph_run_desc, brush, measuring_mode);
+ }
+ 
++struct d2d_command_sink
++{
++    ID2D1CommandSink ID2D1CommandSink_iface;
++    LONG refcount;
++    struct d2d_device_context *context;
++};
++
++static inline struct d2d_command_sink *impl_from_ID2D1CommandSink(ID2D1CommandSink *iface)
++{
++    return CONTAINING_RECORD(iface, struct d2d_command_sink, ID2D1CommandSink_iface);
++}
++
++#define SINK_RT(sink) ((ID2D1RenderTarget *)&(sink)->context->ID2D1DeviceContext6_iface)
++#define SINK_DC(sink) ((ID2D1DeviceContext *)&(sink)->context->ID2D1DeviceContext6_iface)
++#define SINK_DC1(sink) ((ID2D1DeviceContext1 *)&(sink)->context->ID2D1DeviceContext6_iface)
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_QueryInterface(ID2D1CommandSink *iface, REFIID iid, void **out)
++{
++    if (IsEqualGUID(iid, &IID_ID2D1CommandSink) || IsEqualGUID(iid, &IID_IUnknown))
++    {
++        ID2D1CommandSink_AddRef(iface);
++        *out = iface;
++        return S_OK;
++    }
++
++    WARN("%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(iid));
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++
++static ULONG STDMETHODCALLTYPE d2d_command_sink_AddRef(ID2D1CommandSink *iface)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    return InterlockedIncrement(&sink->refcount);
++}
++
++static ULONG STDMETHODCALLTYPE d2d_command_sink_Release(ID2D1CommandSink *iface)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++    ULONG refcount = InterlockedDecrement(&sink->refcount);
++
++    if (!refcount)
++        free(sink);
++
++    return refcount;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_BeginDraw(ID2D1CommandSink *iface)
++{
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_EndDraw(ID2D1CommandSink *iface)
++{
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_SetAntialiasMode(ID2D1CommandSink *iface, D2D1_ANTIALIAS_MODE mode)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1RenderTarget_SetAntialiasMode(SINK_RT(sink), mode);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_SetTags(ID2D1CommandSink *iface, D2D1_TAG tag1, D2D1_TAG tag2)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1DeviceContext_SetTags(SINK_DC(sink), tag1, tag2);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_SetTextAntialiasMode(ID2D1CommandSink *iface,
++        D2D1_TEXT_ANTIALIAS_MODE mode)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1RenderTarget_SetTextAntialiasMode(SINK_RT(sink), mode);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_SetTextRenderingParams(ID2D1CommandSink *iface,
++        IDWriteRenderingParams *params)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1RenderTarget_SetTextRenderingParams(SINK_RT(sink), params);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_SetTransform(ID2D1CommandSink *iface, const D2D1_MATRIX_3X2_F *transform)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1RenderTarget_SetTransform(SINK_RT(sink), transform);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_SetPrimitiveBlend(ID2D1CommandSink *iface, D2D1_PRIMITIVE_BLEND blend)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1DeviceContext1_SetPrimitiveBlend(SINK_DC1(sink), blend);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_SetUnitMode(ID2D1CommandSink *iface, D2D1_UNIT_MODE mode)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1DeviceContext1_SetUnitMode(SINK_DC1(sink), mode);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_Clear(ID2D1CommandSink *iface, const D2D1_COLOR_F *color)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1RenderTarget_Clear(SINK_RT(sink), color);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_DrawGlyphRun(ID2D1CommandSink *iface, D2D1_POINT_2F baseline_origin,
++        const DWRITE_GLYPH_RUN *glyph_run, const DWRITE_GLYPH_RUN_DESCRIPTION *glyph_run_desc, ID2D1Brush *brush,
++        DWRITE_MEASURING_MODE measuring_mode)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1DeviceContext_DrawGlyphRun(SINK_DC(sink), baseline_origin, glyph_run, glyph_run_desc, brush, measuring_mode);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_DrawLine(ID2D1CommandSink *iface, D2D1_POINT_2F p0, D2D1_POINT_2F p1,
++        ID2D1Brush *brush, float stroke_width, ID2D1StrokeStyle *stroke_style)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1RenderTarget_DrawLine(SINK_RT(sink), p0, p1, brush, stroke_width, stroke_style);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_DrawGeometry(ID2D1CommandSink *iface, ID2D1Geometry *geometry,
++        ID2D1Brush *brush, float stroke_width, ID2D1StrokeStyle *stroke_style)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1RenderTarget_DrawGeometry(SINK_RT(sink), geometry, brush, stroke_width, stroke_style);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_DrawRectangle(ID2D1CommandSink *iface, const D2D1_RECT_F *rect,
++        ID2D1Brush *brush, float stroke_width, ID2D1StrokeStyle *stroke_style)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1RenderTarget_DrawRectangle(SINK_RT(sink), rect, brush, stroke_width, stroke_style);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_DrawBitmap(ID2D1CommandSink *iface, ID2D1Bitmap *bitmap,
++        const D2D1_RECT_F *dst_rect, float opacity, D2D1_INTERPOLATION_MODE interpolation_mode,
++        const D2D1_RECT_F *src_rect, const D2D1_MATRIX_4X4_F *perspective_transform)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1DeviceContext1_DrawBitmap(SINK_DC1(sink), bitmap, dst_rect, opacity, interpolation_mode, src_rect,
++            perspective_transform);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_DrawImage(ID2D1CommandSink *iface, ID2D1Image *image,
++        const D2D1_POINT_2F *target_offset, const D2D1_RECT_F *image_rect, D2D1_INTERPOLATION_MODE interpolation_mode,
++        D2D1_COMPOSITE_MODE composite_mode)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1DeviceContext_DrawImage(SINK_DC(sink), image, target_offset, image_rect, interpolation_mode, composite_mode);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_DrawGdiMetafile(ID2D1CommandSink *iface, ID2D1GdiMetafile *metafile,
++        const D2D1_POINT_2F *target_offset)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1DeviceContext1_DrawGdiMetafile(SINK_DC1(sink), metafile, target_offset);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_FillMesh(ID2D1CommandSink *iface, ID2D1Mesh *mesh, ID2D1Brush *brush)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1RenderTarget_FillMesh(SINK_RT(sink), mesh, brush);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_FillOpacityMask(ID2D1CommandSink *iface, ID2D1Bitmap *bitmap,
++        ID2D1Brush *brush, const D2D1_RECT_F *dst_rect, const D2D1_RECT_F *src_rect)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1DeviceContext_FillOpacityMask(SINK_DC(sink), bitmap, brush, dst_rect, src_rect);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_FillGeometry(ID2D1CommandSink *iface, ID2D1Geometry *geometry,
++        ID2D1Brush *brush, ID2D1Brush *opacity_brush)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1RenderTarget_FillGeometry(SINK_RT(sink), geometry, brush, opacity_brush);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_FillRectangle(ID2D1CommandSink *iface, const D2D1_RECT_F *rect,
++        ID2D1Brush *brush)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1RenderTarget_FillRectangle(SINK_RT(sink), rect, brush);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_PushAxisAlignedClip(ID2D1CommandSink *iface, const D2D1_RECT_F *rect,
++        D2D1_ANTIALIAS_MODE mode)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1RenderTarget_PushAxisAlignedClip(SINK_RT(sink), rect, mode);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_PushLayer(ID2D1CommandSink *iface,
++        const D2D1_LAYER_PARAMETERS1 *params, ID2D1Layer *layer)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1DeviceContext_PushLayer(SINK_DC(sink), params, layer);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_PopAxisAlignedClip(ID2D1CommandSink *iface)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1RenderTarget_PopAxisAlignedClip(SINK_RT(sink));
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_PopLayer(ID2D1CommandSink *iface)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1RenderTarget_PopLayer(SINK_RT(sink));
++    return S_OK;
++}
++
++static const ID2D1CommandSinkVtbl d2d_command_sink_vtbl =
++{
++    d2d_command_sink_QueryInterface,
++    d2d_command_sink_AddRef,
++    d2d_command_sink_Release,
++    d2d_command_sink_BeginDraw,
++    d2d_command_sink_EndDraw,
++    d2d_command_sink_SetAntialiasMode,
++    d2d_command_sink_SetTags,
++    d2d_command_sink_SetTextAntialiasMode,
++    d2d_command_sink_SetTextRenderingParams,
++    d2d_command_sink_SetTransform,
++    d2d_command_sink_SetPrimitiveBlend,
++    d2d_command_sink_SetUnitMode,
++    d2d_command_sink_Clear,
++    d2d_command_sink_DrawGlyphRun,
++    d2d_command_sink_DrawLine,
++    d2d_command_sink_DrawGeometry,
++    d2d_command_sink_DrawRectangle,
++    d2d_command_sink_DrawBitmap,
++    d2d_command_sink_DrawImage,
++    d2d_command_sink_DrawGdiMetafile,
++    d2d_command_sink_FillMesh,
++    d2d_command_sink_FillOpacityMask,
++    d2d_command_sink_FillGeometry,
++    d2d_command_sink_FillRectangle,
++    d2d_command_sink_PushAxisAlignedClip,
++    d2d_command_sink_PushLayer,
++    d2d_command_sink_PopAxisAlignedClip,
++    d2d_command_sink_PopLayer,
++};
++
++static HRESULT d2d_command_sink_create(struct d2d_device_context *context, ID2D1CommandSink **sink)
++{
++    struct d2d_command_sink *object;
++
++    if (!(object = calloc(1, sizeof(*object))))
++        return E_OUTOFMEMORY;
++
++    object->ID2D1CommandSink_iface.lpVtbl = &d2d_command_sink_vtbl;
++    object->refcount = 1;
++    object->context = context;
++
++    *sink = &object->ID2D1CommandSink_iface;
++    return S_OK;
++}
++
+ static void STDMETHODCALLTYPE d2d_device_context_DrawImage(ID2D1DeviceContext6 *iface, ID2D1Image *image,
+         const D2D1_POINT_2F *target_offset, const D2D1_RECT_F *image_rect, D2D1_INTERPOLATION_MODE interpolation_mode,
+         D2D1_COMPOSITE_MODE composite_mode)
+ {
+     struct d2d_device_context *context = impl_from_ID2D1DeviceContext(iface);
+     ID2D1Bitmap *bitmap;
++    ID2D1CommandList *command_list;
+ 
+     TRACE("iface %p, image %p, target_offset %s, image_rect %s, interpolation_mode %#x, composite_mode %#x.\n",
+             iface, image, debug_d2d_point_2f(target_offset), debug_d2d_rect_f(image_rect),
+@@ -2755,9 +3063,117 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawImage(ID2D1DeviceContext6 *
+         return;
+     }
+ 
++/* Replay the command list onto the target. */
++    if (SUCCEEDED(ID2D1Image_QueryInterface(image, &IID_ID2D1CommandList, (void **)&command_list)))
++    {
++        ID2D1CommandSink *sink;
++
++        if (SUCCEEDED(d2d_command_sink_create(context, &sink)))
++        {
++            /* Apply the target offset as a translation in target space
++             * (matches Windows behavior: DrawImage(cl, off) shifts the
++             * replayed content by off). */
++            if (target_offset)
++            {
++                D2D1_MATRIX_3X2_F old, t;
++                ID2D1RenderTarget_GetTransform((ID2D1RenderTarget *)&context->ID2D1DeviceContext6_iface, &old);
++                t = old;
++                t._31 += target_offset->x;
++                t._32 += target_offset->y;
++                ID2D1RenderTarget_SetTransform((ID2D1RenderTarget *)&context->ID2D1DeviceContext6_iface, &t);
++                ID2D1CommandList_Stream(command_list, sink);
++                ID2D1RenderTarget_SetTransform((ID2D1RenderTarget *)&context->ID2D1DeviceContext6_iface, &old);
++            }
++            else
++                ID2D1CommandList_Stream(command_list, sink);
++            ID2D1CommandSink_Release(sink);
++        }
++
++        ID2D1CommandList_Release(command_list);
++        return;
++    }
++
++    /* Approximate rendering of the well-known built-in effect graph. */
++    {
++        static const CLSID clsid_2daffine = {0x6aa97485,0x6354,0x4cfc,{0x90,0x8c,0xe4,0xa7,0x4f,0x62,0xc9,0x6c}};
++        static const CLSID clsid_3dtransform = {0xe8467b04,0xec61,0x4b8a,{0xb5,0xde,0xd4,0xd7,0x3d,0xeb,0xea,0x5a}};
++        static const CLSID clsid_crop = {0xe23f7110,0x0e9a,0x4324,{0xaf,0x47,0x6a,0x2c,0x0c,0x46,0xf3,0x5b}};
++        ID2D1Effect *effect;
++        if (SUCCEEDED(ID2D1Image_QueryInterface(image, &IID_ID2D1Effect, (void **)&effect)))
++        {
++            ID2D1RenderTarget *rt = (ID2D1RenderTarget *)&context->ID2D1DeviceContext6_iface;
++            ID2D1Image *input = NULL;
++            CLSID id;
++            D2D1_MATRIX_3X2_F old_transform;
++            BOOL have_transform = FALSE, have_clip = FALSE;
++            D2D1_RECT_F clip_rect;
++
++            memset(&id, 0, sizeof(id));
++            ID2D1Effect_GetValue(effect, D2D1_PROPERTY_CLSID, D2D1_PROPERTY_TYPE_CLSID, (BYTE *)&id, sizeof(id));
++
++            if (IsEqualGUID(&id, &clsid_2daffine) || IsEqualGUID(&id, &clsid_3dtransform))
++            {
++                D2D1_MATRIX_3X2_F m;
++                HRESULT ghr;
++                memset(&m, 0, sizeof(m));
++                m._11 = m._22 = 1.0f;
++                if (IsEqualGUID(&id, &clsid_2daffine))
++                {
++                    ghr = ID2D1Effect_GetValue(effect, 2 /*TRANSFORM_MATRIX*/, D2D1_PROPERTY_TYPE_MATRIX_3X2, (BYTE *)&m, sizeof(m));
++                }
++                else
++                {
++                    D2D1_MATRIX_4X4_F m4;
++                    memset(&m4, 0, sizeof(m4));
++                    ghr = ID2D1Effect_GetValue(effect, 2 /*TRANSFORM_MATRIX*/, D2D1_PROPERTY_TYPE_MATRIX_4X4, (BYTE *)&m4, sizeof(m4));
++                    m._11 = m4._11; m._12 = m4._12; m._21 = m4._21; m._22 = m4._22;
++                    m._31 = m4._41; m._32 = m4._42;
++                }
++                ID2D1RenderTarget_GetTransform(rt, &old_transform);
++                {
++                    D2D1_MATRIX_3X2_F combined;
++                    combined._11 = m._11 * old_transform._11 + m._12 * old_transform._21;
++                    combined._12 = m._11 * old_transform._12 + m._12 * old_transform._22;
++                    combined._21 = m._21 * old_transform._11 + m._22 * old_transform._21;
++                    combined._22 = m._21 * old_transform._12 + m._22 * old_transform._22;
++                    combined._31 = m._31 * old_transform._11 + m._32 * old_transform._21 + old_transform._31;
++                    combined._32 = m._31 * old_transform._12 + m._32 * old_transform._22 + old_transform._32;
++                    ID2D1RenderTarget_SetTransform(rt, &combined);
++                    have_transform = TRUE;
++                }
++            }
++            else if (IsEqualGUID(&id, &clsid_crop))
++            {
++                D2D1_VECTOR_4F v4;
++                if (SUCCEEDED(ID2D1Effect_GetValue(effect, 0 /*RECT*/, D2D1_PROPERTY_TYPE_VECTOR4, (BYTE *)&v4, sizeof(v4))))
++                {
++                    /* Skip "infinite" crop rects (default = no crop). */
++                    if (v4.x > -1.0e7f && v4.y > -1.0e7f && v4.z < 1.0e7f && v4.w < 1.0e7f)
++                    {
++                        clip_rect.left = v4.x; clip_rect.top = v4.y; clip_rect.right = v4.z; clip_rect.bottom = v4.w;
++                        ID2D1RenderTarget_PushAxisAlignedClip(rt, &clip_rect, D2D1_ANTIALIAS_MODE_ALIASED);
++                        have_clip = TRUE;
++                    }
++                }
++            }
++
++            ID2D1Effect_GetInput(effect, 0, &input);
++            if (input)
++            {
++                d2d_device_context_DrawImage(iface, input, target_offset, image_rect, interpolation_mode, composite_mode);
++                ID2D1Image_Release(input);
++            }
++            if (have_clip) ID2D1RenderTarget_PopAxisAlignedClip(rt);
++            if (have_transform) ID2D1RenderTarget_SetTransform(rt, &old_transform);
++            ID2D1Effect_Release(effect);
++            return;
++        }
++    }
++
+     FIXME("Unhandled image %p.\n", image);
+ }
+ 
++
+ static void STDMETHODCALLTYPE d2d_device_context_DrawGdiMetafile(ID2D1DeviceContext6 *iface,
+         ID2D1GdiMetafile *metafile, const D2D1_POINT_2F *target_offset)
+ {
+-- 
+2.56.0
+

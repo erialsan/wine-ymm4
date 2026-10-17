@@ -1,0 +1,32 @@
+From d8dac6e75513015949198a469252148e762a3380 Mon Sep 17 00:00:00 2001
+From: maebahesioru <maebahesioru@users.noreply.github.com>
+Date: Sat, 17 Oct 2026 10:17:45 +0900
+Subject: [PATCH 3/5] d2d1: Don't record Clear() into command lists.
+
+Clears recorded into a command list are executed against the target when
+the list is replayed, which can destroy content drawn before the replay.
+Applications record clear-only command lists and rely on them having no
+effect on the destination.  Skip recording them.
+---
+ dlls/d2d1/device.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/d2d1/device.c b/dlls/d2d1/device.c
+index 20a2f48d..e4dc94e8 100644
+--- a/dlls/d2d1/device.c
++++ b/dlls/d2d1/device.c
+@@ -1987,7 +1987,10 @@ static void STDMETHODCALLTYPE d2d_device_context_Clear(ID2D1DeviceContext6 *ifac
+ 
+     if (context->target.type == D2D_TARGET_COMMAND_LIST)
+     {
+-        d2d_command_list_clear(context->target.command_list, colour);
++        /* Don't record Clear() into command lists: replaying the list would
++         * clear the destination target, destroying previously drawn content.
++         * Applications record clear-only command lists and depend on them
++         * not affecting the destination. */
+         return;
+     }
+ 
+-- 
+2.56.0
+

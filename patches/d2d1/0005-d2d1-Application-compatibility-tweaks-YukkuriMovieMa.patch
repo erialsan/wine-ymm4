@@ -1,0 +1,81 @@
+From 7ae8ddaa91f3e79c09b2a5b69a9ee352c1d5ee7f Mon Sep 17 00:00:00 2001
+From: maebahesioru <maebahesioru@users.noreply.github.com>
+Date: Sat, 17 Oct 2026 16:26:56 +0900
+Subject: [PATCH 5/5] d2d1: Application compatibility tweaks
+ (YukkuriMovieMaker4).
+
+Allow re-recording into a used command list and replaying open lists, and
+shift bitmap blits made with an explicit target offset by half the target
+size, matching the center-origin canvas convention used by the application.
+
+These are compatibility workarounds, not strict Windows behaviour, and are
+kept separate from the general fixes in this series.
+---
+ dlls/d2d1/command_list.c | 12 +++++++++---
+ dlls/d2d1/device.c       | 20 +++++++++++++++++++-
+ 2 files changed, 28 insertions(+), 4 deletions(-)
+
+diff --git a/dlls/d2d1/command_list.c b/dlls/d2d1/command_list.c
+index 6c830d26..d455bc84 100644
+--- a/dlls/d2d1/command_list.c
++++ b/dlls/d2d1/command_list.c
+@@ -292,7 +292,8 @@ static HRESULT STDMETHODCALLTYPE d2d_command_list_Stream(ID2D1CommandList *iface
+ 
+     TRACE("iface %p, sink %p.\n", iface, sink);
+ 
+-    if (command_list->state != D2D_COMMAND_LIST_STATE_CLOSED) return S_OK;
++    if (command_list->state != D2D_COMMAND_LIST_STATE_CLOSED
++            && command_list->state != D2D_COMMAND_LIST_STATE_OPEN) return S_OK;
+ 
+     if (FAILED(hr = ID2D1CommandSink_BeginDraw(sink)))
+         return hr;
+@@ -727,8 +728,13 @@ void d2d_command_list_begin_draw(struct d2d_command_list *command_list,
+ {
+     if (command_list->state != D2D_COMMAND_LIST_STATE_INITIAL)
+     {
+-        command_list->state = D2D_COMMAND_LIST_STATE_ERROR;
+-        return;
++        /* Application compat: some applications re-begin recording on a
++         * command list that has been used before.  Reset it instead of
++         * marking it broken, which would silently drop every later replay. */
++        while (command_list->objects_count)
++            IUnknown_Release(command_list->objects[--command_list->objects_count]);
++        command_list->size = 0;
++        command_list->state = D2D_COMMAND_LIST_STATE_INITIAL;
+     }
+ 
+     d2d_command_list_set_antialias_mode(command_list, context->drawing_state.antialiasMode);
+diff --git a/dlls/d2d1/device.c b/dlls/d2d1/device.c
+index 1f7271a7..9fb8344f 100644
+--- a/dlls/d2d1/device.c
++++ b/dlls/d2d1/device.c
+@@ -3118,7 +3118,25 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawImage(ID2D1DeviceContext6 *
+ 
+     if (SUCCEEDED(ID2D1Image_QueryInterface(image, &IID_ID2D1Bitmap, (void **)&bitmap)))
+     {
+-        d2d_device_context_draw_bitmap(context, bitmap, NULL, 1.0f, interpolation_mode, image_rect, target_offset, NULL);
++        D2D1_POINT_2F adj_off;
++        const D2D1_POINT_2F *use_offset = target_offset;
++        ID2D1Bitmap *target_bitmap = NULL;
++
++        /* Application compat: applications may compose in a center-origin
++         * canvas space, expecting bitmap blits with an explicit offset to be
++         * positioned relative to the center of the target. */
++        if (target_offset && context->target.type != D2D_TARGET_COMMAND_LIST
++                && SUCCEEDED(ID2D1Image_QueryInterface((ID2D1Image *)context->target.object,
++                        &IID_ID2D1Bitmap, (void **)&target_bitmap)))
++        {
++            D2D_SIZE_U ts = ID2D1Bitmap_GetPixelSize(target_bitmap);
++            adj_off.x = target_offset->x + ts.width / 2.0f;
++            adj_off.y = target_offset->y + ts.height / 2.0f;
++            use_offset = &adj_off;
++            ID2D1Bitmap_Release(target_bitmap);
++        }
++
++        d2d_device_context_draw_bitmap(context, bitmap, NULL, 1.0f, interpolation_mode, image_rect, use_offset, NULL);
+ 
+         ID2D1Bitmap_Release(bitmap);
+         return;
+-- 
+2.56.0
+
