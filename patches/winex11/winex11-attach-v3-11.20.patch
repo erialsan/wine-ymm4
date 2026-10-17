@@ -1,0 +1,108 @@
+diff --git a/dlls/winex11.drv/init.c b/dlls/winex11.drv/init.c
+index cf032cb..f6d8881 100644
+--- a/dlls/winex11.drv/init.c
++++ b/dlls/winex11.drv/init.c
+@@ -27,6 +27,7 @@
+ #include <stdarg.h>
+ #include <string.h>
+ #include <assert.h>
++#include <stdlib.h>
+ 
+ #include "windef.h"
+ #include "winbase.h"
+@@ -222,6 +223,11 @@ static BOOL needs_client_window_clipping( HWND hwnd )
+ 
+ static BOOL needs_offscreen_rendering( HWND hwnd, BOOL raw )
+ {
++    /* YMM4 fix: force direct attach for child surface windows when requested. */
++    if (getenv( "WINE_X11_CHILD_SURFACE_ATTACH" ) &&
++        NtUserGetAncestor( hwnd, GA_PARENT ) != NtUserGetDesktopWindow())
++        return FALSE;
++
+     if (!raw && NtUserGetDpiForWindow( hwnd ) != NtUserGetWinMonitorDpi( hwnd, MDT_RAW_DPI )) return TRUE; /* needs DPI scaling */
+     if (NtUserGetAncestor( hwnd, GA_PARENT ) != NtUserGetDesktopWindow()) return TRUE; /* child window, needs compositing */
+     if (NtUserGetWindowRelative( hwnd, GW_CHILD )) return needs_client_window_clipping( hwnd ); /* window has children, needs compositing */
+@@ -322,6 +328,8 @@ static void client_surface_update_offscreen( HWND hwnd, struct x11drv_client_sur
+             attach_client_window( data, surface->window );
+             release_win_data( data );
+         }
++        if (!offscreen && getenv( "WINE_X11_CHILD_SURFACE_ATTACH" ))
++            x11drv_attach_child_surface( hwnd, surface->window ); /* YMM4 */
+         return;
+     }
+     else
+@@ -367,6 +375,9 @@ static void client_surface_update_offscreen( HWND hwnd, struct x11drv_client_sur
+         else attach_client_window( data, surface->window );
+         release_win_data( data );
+     }
++
++    if (!offscreen && getenv( "WINE_X11_CHILD_SURFACE_ATTACH" ))
++        x11drv_attach_child_surface( hwnd, surface->window ); /* YMM4 */
+ }
+ 
+ static void x11drv_client_surface_update( struct client_surface *client )
+diff --git a/dlls/winex11.drv/window.c b/dlls/winex11.drv/window.c
+index d7df0a8..5af30f0 100644
+--- a/dlls/winex11.drv/window.c
++++ b/dlls/winex11.drv/window.c
+@@ -2341,6 +2341,48 @@ void attach_client_window( struct x11drv_win_data *data, Window client_window )
+ }
+ 
+ 
++/* YMM4 fix: attach a child surface window directly to its toplevel X window so that
++ * native D3D/Vulkan presents (DXVK) become visible. Called from the client surface
++ * update paths in a context where no win_data lock is held.
++ * Gated by env var WINE_X11_CHILD_SURFACE_ATTACH. */
++void x11drv_attach_child_surface( HWND hwnd, Window window )
++{
++    static HWND last_hwnd;
++    static Window last_window, last_top;
++    static int last_x, last_y, last_w, last_h;
++    HWND toplevel = NtUserGetAncestor( hwnd, GA_ROOT );
++    struct x11drv_win_data *data;
++    RECT wrect, trect;
++    Window top_window;
++    int x, y, w, h;
++
++    if (!toplevel || toplevel == hwnd) return;
++    if (NtUserGetAncestor( hwnd, GA_PARENT ) == NtUserGetDesktopWindow()) return; /* child windows only */
++    if (!NtUserGetWindowRect( hwnd, &wrect, NtUserGetDpiForWindow( hwnd ) ) ||
++        !NtUserGetWindowRect( toplevel, &trect, NtUserGetDpiForWindow( toplevel ) )) return;
++    w = wrect.right - wrect.left;
++    h = wrect.bottom - wrect.top;
++    if (w <= 0 || h <= 0) return; /* not laid out yet; retry on a later update */
++    w = min( max( 1, w ), 65535 );
++    h = min( max( 1, h ), 65535 );
++    if (!(data = get_win_data( toplevel ))) return;
++    top_window = data->whole_window;
++    release_win_data( data );
++    if (!top_window) return;
++    x = wrect.left - trect.left;
++    y = wrect.top - trect.top;
++    if (hwnd == last_hwnd && window == last_window && top_window == last_top &&
++        x == last_x && y == last_y && w == last_w && h == last_h) return;
++    last_hwnd = hwnd; last_window = window; last_top = top_window;
++    last_x = x; last_y = y; last_w = w; last_h = h;
++    WARN( "attach-child: %p window %lx -> %lx at %d,%d size %dx%d\n", hwnd, window, top_window, x, y, w, h );
++    XReparentWindow( gdi_display, window, top_window, x, y );
++    XMoveResizeWindow( gdi_display, window, x, y, w, h );
++    XMapRaised( gdi_display, window );
++    XFlush( gdi_display );
++}
++
++
+ /**********************************************************************
+  *      destroy_client_window
+  */
+diff --git a/dlls/winex11.drv/x11drv.h b/dlls/winex11.drv/x11drv.h
+index 22462df..a071f69 100644
+--- a/dlls/winex11.drv/x11drv.h
++++ b/dlls/winex11.drv/x11drv.h
+@@ -745,6 +745,7 @@ extern void make_window_embedded( struct x11drv_win_data *data );
+ extern Window create_client_window( HWND hwnd, RECT client_rect, const XVisualInfo *visual, Colormap colormap );
+ extern void detach_client_window( struct x11drv_win_data *data, Window client_window );
+ extern void attach_client_window( struct x11drv_win_data *data, Window client_window );
++extern void x11drv_attach_child_surface( HWND hwnd, Window window ); /* YMM4 */
+ extern void destroy_client_window( HWND hwnd, Window client_window );
+ extern void set_window_visual( struct x11drv_win_data *data, const XVisualInfo *vis, BOOL use_alpha );
+ extern void change_systray_owner( Display *display, Window systray_window );
