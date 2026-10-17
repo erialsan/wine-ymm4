@@ -2,14 +2,14 @@
 # wine-ymm4: d2d1.dll をビルドするスクリプト
 # 使い方: build-d2d1.sh <wine-source-dir> [deploy-dest ...]
 #   例: build-d2d1.sh ~/wine
-#       build-d2d1.sh ~/wine /opt/wine-cachyos/lib/wine/x86_64-windows ~/.wine/drive_c/windows/system32
+#       build-d2d1.sh ~/wine /opt/wine11up/lib/wine/x86_64-windows ~/.wine/drive_c/windows/system32
 set -e
 SRC="${1:?usage: $0 <wine-source-dir> [deploy-dest ...]}"; shift || true
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 
 cd "$SRC"
 if [ ! -f configure ]; then
-    echo "wine configure が見つかりません。先に ./configure --enable-archs=x86_64 --disable-tests を実行してください" >&2
+    echo "wine configure が見つかりません。先に ./configure --enable-archs=i386,x86_64 --disable-tests --enable-maintainer-mode を実行してください" >&2
     exit 1
 fi
 
