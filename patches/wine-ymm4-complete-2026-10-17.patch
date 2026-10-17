@@ -1,0 +1,1459 @@
+diff --git a/dlls/d2d1/bitmap.c b/dlls/d2d1/bitmap.c
+index c6ab60c1..f4753288 100644
+--- a/dlls/d2d1/bitmap.c
++++ b/dlls/d2d1/bitmap.c
+@@ -176,6 +176,11 @@ static HRESULT STDMETHODCALLTYPE d2d_bitmap_CopyFromBitmap(ID2D1Bitmap1 *iface,
+     ID3D11DeviceContext_CopySubresourceRegion(context, dst_bitmap->resource, 0,
+             dst_point ? dst_point->x : 0, dst_point ? dst_point->y : 0, 0,
+             src_bitmap->resource, 0, src_rect ? &box : NULL);
++    if (0) fprintf(stderr, "YMM4DIAG: CopyFromBitmap dst=%ux%u src=%ux%u at=(%u,%u)\n",
++            dst_bitmap->pixel_size.width, dst_bitmap->pixel_size.height,
++            src_bitmap->pixel_size.width, src_bitmap->pixel_size.height,
++            dst_point ? dst_point->x : 0, dst_point ? dst_point->y : 0);
++    fflush(stderr);
+     ID3D11DeviceContext_Release(context);
+     ID3D11Device_Release(device);
+ 
+@@ -277,6 +282,12 @@ static HRESULT STDMETHODCALLTYPE d2d_bitmap_GetSurface(ID2D1Bitmap1 *iface, IDXG
+ static HRESULT STDMETHODCALLTYPE d2d_bitmap_Map(ID2D1Bitmap1 *iface, D2D1_MAP_OPTIONS options,
+         D2D1_MAPPED_RECT *mapped_rect)
+ {
++    {
++        struct d2d_bitmap *dbg_mb = impl_from_ID2D1Bitmap1(iface);
++        if (0) fprintf(stderr, "YMM4DIAG: bitmapMap %ux%u opts=%u\n",
++                dbg_mb->pixel_size.width, dbg_mb->pixel_size.height, dbg_mb->options);
++        fflush(stderr);
++    }
+     struct d2d_bitmap *bitmap = impl_from_ID2D1Bitmap1(iface);
+     D3D11_MAPPED_SUBRESOURCE mapped_resource;
+     ID3D11DeviceContext *context;
+@@ -416,6 +427,14 @@ static void d2d_bitmap_init(struct d2d_bitmap *bitmap, struct d2d_device_context
+     {
+         if (FAILED(hr = ID3D11Device_CreateRenderTargetView(d3d_device, resource, NULL, &bitmap->rtv)))
+             WARN("Failed to create RTV, hr %#lx.\n", hr);
++        if (0) fprintf(stderr, "YMM4DIAG: bitmapinit %p opts=%#x rtv=%p hr=%#lx resource=%p resdev=%p ctxdev=%p\n",
++                (void *)bitmap, bitmap->options, (void *)bitmap->rtv, (unsigned long)hr, (void *)resource,
++                (void *)d3d_device, (void *)context->d3d_device); fflush(stderr);
++    }
++    else
++    {
++        if (0) fprintf(stderr, "YMM4DIAG: bitmapinit %p opts=%#x NO-TARGET resource=%p\n",
++                (void *)bitmap, bitmap->options, (void *)resource); fflush(stderr);
+     }
+ 
+     if (!(bitmap->options & D2D1_BITMAP_OPTIONS_CANNOT_DRAW))
+diff --git a/dlls/d2d1/command_list.c b/dlls/d2d1/command_list.c
+index 6c830d26..69500683 100644
+--- a/dlls/d2d1/command_list.c
++++ b/dlls/d2d1/command_list.c
+@@ -292,7 +292,8 @@ static HRESULT STDMETHODCALLTYPE d2d_command_list_Stream(ID2D1CommandList *iface
+ 
+     TRACE("iface %p, sink %p.\n", iface, sink);
+ 
+-    if (command_list->state != D2D_COMMAND_LIST_STATE_CLOSED) return S_OK;
++    if (0) fprintf(stderr, "YMM4DIAG: CLstream %p state=%d size=%zu\n", (void *)command_list, command_list->state, command_list->size); fflush(stderr);
++    if (command_list->state != D2D_COMMAND_LIST_STATE_CLOSED && command_list->state != D2D_COMMAND_LIST_STATE_OPEN) return S_OK;
+ 
+     if (FAILED(hr = ID2D1CommandSink_BeginDraw(sink)))
+         return hr;
+@@ -303,6 +304,8 @@ static HRESULT STDMETHODCALLTYPE d2d_command_list_Stream(ID2D1CommandList *iface
+     {
+         const struct d2d_command *command = data;
+ 
++        if (0) fprintf(stderr, "YMM4DIAG: CLop %p op=%#x\n", (void *)command_list, command->op); fflush(stderr);
++
+         switch (command->op)
+         {
+             case D2D_COMMAND_SET_ANTIALIAS_MODE:
+@@ -505,10 +508,15 @@ static HRESULT STDMETHODCALLTYPE d2d_command_list_Close(ID2D1CommandList *iface)
+     FIXME("iface %p stub.\n", iface);
+ 
+     if (command_list->state != D2D_COMMAND_LIST_STATE_OPEN)
++    {
++        if (0) fprintf(stderr, "YMM4DIAG: CLclose %p FAILED state=%d\n", (void *)command_list, command_list->state); fflush(stderr);
+         return D2DERR_WRONG_STATE;
++    }
+ 
+     command_list->state = D2D_COMMAND_LIST_STATE_CLOSED;
+ 
++    if (0) fprintf(stderr, "YMM4DIAG: CLclose %p size=%zu\n", (void *)command_list, command_list->size); fflush(stderr);
++
+     /* FIXME: reset as a target */
+ 
+     return S_OK;
+@@ -727,8 +735,18 @@ void d2d_command_list_begin_draw(struct d2d_command_list *command_list,
+ {
+     if (command_list->state != D2D_COMMAND_LIST_STATE_INITIAL)
+     {
+-        command_list->state = D2D_COMMAND_LIST_STATE_ERROR;
+-        return;
++        /* YMM4 fix: allow re-recording into a previously used command list.
++         * The app re-begins recording on existing command lists; upstream marks
++         * them ERROR here, which silently kills every later replay (black frames). */
++        if (0) fprintf(stderr, "YMM4DIAG: CLbegin %p old_state=%d -> reset\n", (void *)command_list, command_list->state); fflush(stderr);
++        while (command_list->objects_count)
++            IUnknown_Release(command_list->objects[--command_list->objects_count]);
++        command_list->size = 0;
++        command_list->state = D2D_COMMAND_LIST_STATE_INITIAL;
++    }
++    else
++    {
++        if (0) fprintf(stderr, "YMM4DIAG: CLbegin %p old_state=%d\n", (void *)command_list, command_list->state); fflush(stderr);
+     }
+ 
+     d2d_command_list_set_antialias_mode(command_list, context->drawing_state.antialiasMode);
+diff --git a/dlls/d2d1/d2d1_private.h b/dlls/d2d1/d2d1_private.h
+index ba6cea78..f1da4160 100644
+--- a/dlls/d2d1/d2d1_private.h
++++ b/dlls/d2d1/d2d1_private.h
+@@ -219,6 +219,10 @@ struct d2d_device_context
+     D2D1_RENDER_TARGET_PROPERTIES desc;
+     D2D1_SIZE_U pixel_size;
+     struct d2d_clip_stack clip_stack;
++    unsigned int replay_depth;
++    unsigned int effect_depth;
++    unsigned int replay_offset_valid;
++    D2D1_POINT_2F replay_offset;
+ 
+     struct d2d_indexed_objects vertex_buffers;
+ };
+@@ -859,6 +863,7 @@ struct d2d_effect
+     LONG refcount;
+ 
+     ID2D1EffectImpl *impl;
++    BOOL impl_broken;
+     struct d2d_effect_properties properties;
+     struct d2d_effect_context *effect_context;
+     struct d2d_transform_graph *graph;
+diff --git a/dlls/d2d1/device.c b/dlls/d2d1/device.c
+index 552d6d4c..60a936a3 100644
+--- a/dlls/d2d1/device.c
++++ b/dlls/d2d1/device.c
+@@ -18,6 +18,7 @@
+ 
+ #include "d2d1_private.h"
+ #include <d3dcompiler.h>
++#include <stdio.h>
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(d2d);
+ 
+@@ -171,6 +172,17 @@ static void d2d_device_context_draw(struct d2d_device_context *render_target, en
+     }
+     ID3D11DeviceContext1_RSSetScissorRects(context, 1, &scissor_rect);
+     ID3D11DeviceContext1_RSSetState(context, render_target->rs);
++    {
++        static unsigned int dbg_drawcnt;
++        dbg_drawcnt++;
++        if (dbg_drawcnt < 60 || dbg_drawcnt % 300 == 0)
++            if (0) fprintf(stderr, "YMM4DIAG: DRAW#%u vp=%.0fx%.0f scissor=(%ld,%ld,%ld,%ld) rtv=%p clips=%u tgt=%p\n",
++                    dbg_drawcnt, vp.Width, vp.Height,
++                    (long)scissor_rect.left, (long)scissor_rect.top, (long)scissor_rect.right, (long)scissor_rect.bottom,
++                    (void *)render_target->target.bitmap->rtv, render_target->clip_stack.count,
++                    (void *)render_target->target.bitmap);
++        fflush(stderr);
++    }
+     ID3D11DeviceContext1_OMSetRenderTargets(context, 1, &render_target->target.bitmap->rtv, NULL);
+     if (brush)
+     {
+@@ -1240,7 +1252,19 @@ static void d2d_device_context_draw_bitmap(struct d2d_device_context *context, I
+         return;
+     }
+ 
++    {
++        ID3D11Device *tgtdev = NULL, *ctxdev2 = NULL;
++        if (context->target.bitmap && context->target.bitmap->resource)
++            ID3D11Resource_GetDevice(context->target.bitmap->resource, &tgtdev);
++        ctxdev2 = (ID3D11Device *)context->d3d_device;
++        if (0) fprintf(stderr, "YMM4DIAG: DBfill pre err=%#lx brush=%p d=(%.0f,%.0f,%.0f,%.0f) s=(%.0f,%.0f,%.0f,%.0f) tgt=%p rtv=%p ttype=%d tgtdev=%p ctxdev=%p\n",
++                (unsigned long)context->error.code, (void *)brush, d.left, d.top, d.right, d.bottom, s.left, s.top, s.right, s.bottom,
++                (void *)context->target.bitmap, context->target.bitmap ? (void *)context->target.bitmap->rtv : NULL, context->target.type,
++                (void *)tgtdev, (void *)ctxdev2); fflush(stderr);
++        if (tgtdev) ID3D11Device_Release(tgtdev);
++    }
+     d2d_device_context_FillRectangle(&context->ID2D1DeviceContext6_iface, &d, &brush->ID2D1Brush_iface);
++    if (0) fprintf(stderr, "YMM4DIAG: DBfill post err=%#lx\n", (unsigned long)context->error.code); fflush(stderr);
+     ID2D1Brush_Release(&brush->ID2D1Brush_iface);
+ }
+ 
+@@ -1252,6 +1276,13 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawBitmap(ID2D1DeviceContext6
+ 
+     TRACE("iface %p, bitmap %p, dst_rect %s, opacity %.8e, interpolation_mode %#x, src_rect %s.\n",
+             iface, bitmap, debug_d2d_rect_f(dst_rect), opacity, interpolation_mode, debug_d2d_rect_f(src_rect));
++    {
++        D2D1_MATRIX_3X2_F ct = impl_from_ID2D1DeviceContext(iface)->drawing_state.transform;
++        if (0) fprintf(stderr, "YMM4DIAG: DrawBitmap dst=(%.0f,%.0f,%.0f,%.0f) src=%s ctxT=(%.1f,%.1f,%.1f,%.1f,%.1f,%.1f) tgt_type=%d\n",
++                dst_rect?dst_rect->left:0, dst_rect?dst_rect->top:0, dst_rect?dst_rect->right:0, dst_rect?dst_rect->bottom:0,
++                src_rect?"Y":"N", ct._11, ct._12, ct._21, ct._22, ct._31, ct._32,
++                impl_from_ID2D1DeviceContext(iface)->target.type); fflush(stderr);
++    }
+ 
+     if (FAILED(context->error.code))
+         return;
+@@ -1719,6 +1750,10 @@ static void STDMETHODCALLTYPE d2d_device_context_SetTransform(ID2D1DeviceContext
+ 
+     TRACE("iface %p, transform %p.\n", iface, transform);
+ 
++    if (0) fprintf(stderr, "YMM4DIAG: SetTransform (%.2f,%.2f,%.2f,%.2f,%.2f,%.2f) target_type=%d\n",
++            transform->_11, transform->_12, transform->_21, transform->_22, transform->_31, transform->_32,
++            context->target.type); fflush(stderr);
++
+     if (context->target.type == D2D_TARGET_COMMAND_LIST)
+         d2d_command_list_set_transform(context->target.command_list, transform);
+ 
+@@ -1927,6 +1962,11 @@ static void STDMETHODCALLTYPE d2d_device_context_PushAxisAlignedClip(ID2D1Device
+ 
+     TRACE("iface %p, clip_rect %s, antialias_mode %#x.\n", iface, debug_d2d_rect_f(clip_rect), antialias_mode);
+ 
++    if (0) fprintf(stderr, "YMM4DIAG: PushClip (%.0f,%.0f,%.0f,%.0f) clips_before=%u ttype=%d\n",
++            clip_rect->left, clip_rect->top, clip_rect->right, clip_rect->bottom,
++            context->clip_stack.count, context->target.type);
++    fflush(stderr);
++
+     if (context->target.type == D2D_TARGET_COMMAND_LIST)
+         d2d_command_list_push_clip(context->target.command_list, clip_rect, antialias_mode);
+ 
+@@ -1958,6 +1998,9 @@ static void STDMETHODCALLTYPE d2d_device_context_PopAxisAlignedClip(ID2D1DeviceC
+ 
+     TRACE("iface %p.\n", iface);
+ 
++    if (0) fprintf(stderr, "YMM4DIAG: PopClip clips_before=%u ttype=%d\n", context->clip_stack.count, context->target.type);
++    fflush(stderr);
++
+     if (context->target.type == D2D_TARGET_COMMAND_LIST)
+         d2d_command_list_pop_clip(context->target.command_list);
+ 
+@@ -1987,9 +2030,16 @@ static void STDMETHODCALLTYPE d2d_device_context_Clear(ID2D1DeviceContext6 *ifac
+ 
+     if (context->target.type == D2D_TARGET_COMMAND_LIST)
+     {
+-        d2d_command_list_clear(context->target.command_list, colour);
++        /* YMM4 fix: do not record Clear into command lists. Real Direct2D does
++         * not support Clear as a recorded command-list operation; recording it
++         * here and replaying it later wipes previously drawn content (the
++         * preview player's trailing clear erased every frame, black preview). */
+         return;
+     }
++    if (0) fprintf(stderr, "YMM4DIAG: ClearLR color=(%.2f,%.2f,%.2f,%.2f) tgt=%p ttype=%d clips=%u\n",
++            colour ? colour->r : 0, colour ? colour->g : 0, colour ? colour->b : 0, colour ? colour->a : 0,
++            (void *)context->target.object, context->target.type, context->clip_stack.count);
++    fflush(stderr);
+ 
+     ID3D11Device1_GetImmediateContext(context->d3d_device, &d3d_context);
+ 
+@@ -2059,6 +2109,8 @@ static void STDMETHODCALLTYPE d2d_device_context_BeginDraw(ID2D1DeviceContext6 *
+     if (context->target.type == D2D_TARGET_COMMAND_LIST)
+         d2d_command_list_begin_draw(context->target.command_list, context);
+ 
++    if (0) fprintf(stderr, "YMM4DIAG: BeginDraw target=%p type=%d\n", (void *)context->target.object, context->target.type); fflush(stderr);
++
+     memset(&context->error, 0, sizeof(context->error));
+ }
+ 
+@@ -2072,15 +2124,114 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_EndDraw(ID2D1DeviceContext6
+ 
+     if (context->target.type == D2D_TARGET_COMMAND_LIST)
+     {
+-        FIXME("Unimplemented for command list target.\n");
+-        return E_NOTIMPL;
++        /* YMM4 fix: support ending a draw sequence recorded into a command list
++         * (upstream returns E_NOTIMPL here, breaking all command-list based rendering). */
++        if (tag1)
++            *tag1 = context->error.tag1;
++        if (tag2)
++            *tag2 = context->error.tag2;
++
++        return context->error.code;
++    }
++
++    if (0) fprintf(stderr, "YMM4DIAG: EndDraw code=%#lx\n", (unsigned long)context->error.code); fflush(stderr);
++
++#if 0
++    /* YMM4 diag: dump canvas stats for bitmap targets (every 10th). */
++    if (context->target.type == D2D_TARGET_BITMAP && context->target.object && context->d3d_device)
++    {
++        static unsigned int cbfds_dump_n;
++        cbfds_dump_n++;
++        if (cbfds_dump_n % 10 == 1)
++        {
++            ID2D1Bitmap *dbg_bm;
++            if (SUCCEEDED(ID2D1Image_QueryInterface((ID2D1Image *)context->target.object, &IID_ID2D1Bitmap, (void **)&dbg_bm)))
++            {
++                struct d2d_bitmap *dbg_impl = unsafe_impl_from_ID2D1Bitmap(dbg_bm);
++                if (dbg_impl && dbg_impl->resource)
++                {
++                    ID3D11Texture2D *dbg_tex;
++                    if (SUCCEEDED(ID3D11Resource_QueryInterface(dbg_impl->resource, &IID_ID3D11Texture2D, (void **)&dbg_tex)))
++                    {
++                        D3D11_TEXTURE2D_DESC dbg_sd;
++                        ID3D11Texture2D_GetDesc(dbg_tex, &dbg_sd);
++                        {
++                            D3D11_TEXTURE2D_DESC dbg_dd = dbg_sd;
++                            ID3D11Texture2D *dbg_stage = NULL;
++                            dbg_dd.Usage = D3D11_USAGE_STAGING;
++                            dbg_dd.BindFlags = 0;
++                            dbg_dd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
++                            dbg_dd.MiscFlags = 0;
++                            if (SUCCEEDED(ID3D11Device_CreateTexture2D((ID3D11Device *)context->d3d_device, &dbg_dd, NULL, &dbg_stage)))
++                            {
++                                ID3D11DeviceContext1 *dbg_dc = NULL;
++                                ID3D11Device1_GetImmediateContext1(context->d3d_device, &dbg_dc);
++                                if (dbg_dc)
++                                {
++                                    D3D11_MAPPED_SUBRESOURCE dbg_map;
++                                    ID3D11DeviceContext_CopyResource((ID3D11DeviceContext *)dbg_dc, (ID3D11Resource *)dbg_stage, dbg_impl->resource);
++                                    if (SUCCEEDED(ID3D11DeviceContext_Map((ID3D11DeviceContext *)dbg_dc, (ID3D11Resource *)dbg_stage, 0, D3D11_MAP_READ, 0, &dbg_map)))
++                                    {
++                                        const BYTE *dbg_base = dbg_map.pData;
++                                        unsigned int dbg_row = dbg_map.RowPitch;
++                                        unsigned int gx, gy; unsigned long long ac[3] = {0,0,0}; unsigned int an = 0;
++                                        for (gy = 0; gy < 4; gy++) for (gx = 0; gx < 4; gx++)
++                                        {
++                                            unsigned int px0 = gx * (dbg_sd.Width / 4) + 4, py0 = gy * (dbg_sd.Height / 4) + 4;
++                                            unsigned int px, py;
++                                            for (py = py0; py < py0 + 8 && py < dbg_sd.Height; py++)
++                                            {
++                                                const BYTE *rowp = dbg_base + (size_t)py * dbg_row + (size_t)px0 * 4;
++                                                for (px = px0; px < px0 + 8 && px < dbg_sd.Width; px++, rowp += 4)
++                                                { ac[0] += rowp[2]; ac[1] += rowp[1]; ac[2] += rowp[0]; an++; }
++                                            }
++                                        }
++                                        if (0) fprintf(stderr, "YMM4DIAG: CANVAS %ux%u #%u avgRGB=(%u,%u,%u) n=%u ptr=%p opts=%#x rtv=%p\n",
++                                                dbg_sd.Width, dbg_sd.Height, cbfds_dump_n,
++                                                an ? (unsigned)(ac[0]/an) : 0, an ? (unsigned)(ac[1]/an) : 0,
++                                                an ? (unsigned)(ac[2]/an) : 0, an,
++                                                (void *)dbg_impl, dbg_impl->options, (void *)dbg_impl->rtv);
++                                        fflush(stderr);
++                                        ID3D11DeviceContext_Unmap((ID3D11DeviceContext *)dbg_dc, (ID3D11Resource *)dbg_stage, 0);
++                                    }
++                                    ID3D11DeviceContext1_Release(dbg_dc);
++                                }
++                                ID3D11Texture2D_Release(dbg_stage);
++                            }
++                        }
++                        ID3D11Texture2D_Release(dbg_tex);
++                    }
++                }
++                ID2D1Bitmap_Release(dbg_bm);
++            }
++        }
+     }
+ 
++#endif
+     if (tag1)
+         *tag1 = context->error.tag1;
+     if (tag2)
+         *tag2 = context->error.tag2;
+ 
++#if 0 /* disabled 2026-10-16: A/B test — suspect for black frames with DXVK */
++    /* Flush the D3D11 immediate context to force command submission to the
++     * driver. Required for DXVK compatibility: without this, the rendered
++     * content may not reach the swapchain backbuffer on time. */
++    {
++        ID3D11DeviceContext1 *d3d_context = NULL;
++
++        if (context->d3d_device)
++        {
++            ID3D11Device1_GetImmediateContext1(context->d3d_device, &d3d_context);
++            if (d3d_context)
++            {
++                ID3D11DeviceContext1_Flush(d3d_context);
++                ID3D11DeviceContext1_Release(d3d_context);
++            }
++        }
++    }
++#endif
++
+     if (context->ops && context->ops->device_context_present)
+     {
+         if (FAILED(hr = context->ops->device_context_present(context->outer_unknown)))
+@@ -2274,6 +2425,14 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_CreateBitmapFromDxgiSurface(
+     HRESULT hr;
+ 
+     TRACE("iface %p, surface %p, desc %p, bitmap %p.\n", iface, surface, desc, bitmap);
++    {
++        DXGI_SURFACE_DESC dbg_ssd;
++        if (surface && SUCCEEDED(IDXGISurface_GetDesc(surface, &dbg_ssd)))
++            if (0) fprintf(stderr, "YMM4DIAG: CBFDS surface %ux%u fmt=%u\n", dbg_ssd.Width, dbg_ssd.Height, dbg_ssd.Format);
++        else
++            if (0) fprintf(stderr, "YMM4DIAG: CBFDS surface ?\n");
++        fflush(stderr);
++    }
+ 
+     surface_options = d2d_get_bitmap_options_for_surface(surface);
+ 
+@@ -2304,7 +2463,10 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_CreateBitmapFromDxgiSurface(
+     }
+ 
+     if (SUCCEEDED(hr = d2d_bitmap_create_shared(context, &IID_IDXGISurface, surface, desc, &object)))
++    {
++        if (0) fprintf(stderr, "YMM4DIAG: CBFDS -> object %p\n", (void *)object); fflush(stderr);
+         *bitmap = &object->ID2D1Bitmap1_iface;
++    }
+ 
+     return hr;
+ }
+@@ -2316,7 +2478,11 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_CreateEffect(ID2D1DeviceCont
+ 
+     TRACE("iface %p, effect_id %s, effect %p.\n", iface, debugstr_guid(effect_id), effect);
+ 
+-    return d2d_effect_create(context, effect_id, effect);
++    {
++        HRESULT hr2 = d2d_effect_create(context, effect_id, effect);
++        if (0) fprintf(stderr, "YMM4DIAG: CreateEffect %s hr=%#lx\n", debugstr_guid(effect_id), (unsigned long)hr2); fflush(stderr);
++        return hr2;
++    }
+ }
+ 
+ static HRESULT STDMETHODCALLTYPE d2d_device_context_ID2D1DeviceContext_CreateGradientStopCollection(
+@@ -2426,7 +2592,10 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_GetImageLocalBounds(ID2D1Dev
+     struct d2d_device_context *context = impl_from_ID2D1DeviceContext(iface);
+     D2D_SIZE_U pixel_size;
+     ID2D1Bitmap *bitmap;
++    ID2D1Effect *effect;
++    ID2D1Image *input;
+     D2D_SIZE_F size;
++    HRESULT hr;
+ 
+     TRACE("iface %p, image %p, local_bounds %p.\n", iface, image, local_bounds);
+ 
+@@ -2456,20 +2625,75 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_GetImageLocalBounds(ID2D1Dev
+ 
+         return S_OK;
+     }
++    else if (SUCCEEDED(ID2D1Image_QueryInterface(image, &IID_ID2D1Effect, (void **)&effect)))
++    {
++        /* Effect outputs inherit the bounds of the effect input. This is
++         * exact for pass-through effects and a reasonable approximation for
++         * stub effects which do not render anything yet. */
++        ID2D1Effect_GetInput(effect, 0, &input);
++        ID2D1Effect_Release(effect);
++
++        if (input)
++        {
++            hr = d2d_device_context_GetImageLocalBounds(iface, input, local_bounds);
++            ID2D1Image_Release(input);
++            return hr;
++        }
++
++        /* An effect without a connected input has empty bounds. */
++        local_bounds->left = 0.0f;
++        local_bounds->top = 0.0f;
++        local_bounds->right = 0.0f;
++        local_bounds->bottom = 0.0f;
++
++        return S_OK;
++    }
+     else
+     {
+-        FIXME("Unable to get local bounds of image %p.\n", image);
++        ID2D1CommandList *command_list;
+ 
+-        return E_NOTIMPL;
++        if (SUCCEEDED(ID2D1Image_QueryInterface(image, &IID_ID2D1CommandList, (void **)&command_list)))
++        {
++            /* Command lists do not carry bounds information; report empty
++             * bounds, matching the behavior of an empty drawing. */
++            local_bounds->left = 0.0f;
++            local_bounds->top = 0.0f;
++            local_bounds->right = 0.0f;
++            local_bounds->bottom = 0.0f;
++
++            ID2D1CommandList_Release(command_list);
++
++            return S_OK;
++        }
+     }
++
++    FIXME("Unable to get local bounds of image %p.\n", image);
++
++    return E_NOTIMPL;
+ }
+ 
+ static HRESULT STDMETHODCALLTYPE d2d_device_context_GetImageWorldBounds(ID2D1DeviceContext6 *iface,
+         ID2D1Image *image, D2D1_RECT_F *world_bounds)
+ {
+-    FIXME("iface %p, image %p, world_bounds %p stub!\n", iface, image, world_bounds);
++    struct d2d_device_context *context = impl_from_ID2D1DeviceContext(iface);
++    D2D1_RECT_F local_bounds;
++    D2D1_MATRIX_3X2_F transform;
++    HRESULT hr;
+ 
+-    return E_NOTIMPL;
++    TRACE("iface %p, image %p, world_bounds %p.\n", iface, image, world_bounds);
++
++    hr = d2d_device_context_GetImageLocalBounds(iface, image, &local_bounds);
++    if (FAILED(hr))
++        return hr;
++
++    d2d_device_context_GetTransform(&context->ID2D1DeviceContext6_iface, &transform);
++
++    world_bounds->left = local_bounds.left * transform.m11 + local_bounds.top * transform.m21 + transform.dx;
++    world_bounds->top = local_bounds.left * transform.m12 + local_bounds.top * transform.m22 + transform.dy;
++    world_bounds->right = local_bounds.right * transform.m11 + local_bounds.bottom * transform.m21 + transform.dx;
++    world_bounds->bottom = local_bounds.right * transform.m12 + local_bounds.bottom * transform.m22 + transform.dy;
++
++    return S_OK;
+ }
+ 
+ static HRESULT STDMETHODCALLTYPE d2d_device_context_GetGlyphRunWorldBounds(ID2D1DeviceContext6 *iface,
+@@ -2568,6 +2792,26 @@ static void STDMETHODCALLTYPE d2d_device_context_SetTarget(ID2D1DeviceContext6 *
+ 
+     TRACE("iface %p, target %p.\n", iface, target);
+ 
++    {
++        ID2D1Bitmap *tmp_bitmap;
++        if (target && SUCCEEDED(ID2D1Image_QueryInterface(target, &IID_ID2D1Bitmap, (void **)&tmp_bitmap)))
++        {
++            D2D1_SIZE_U ts = ID2D1Bitmap_GetPixelSize(tmp_bitmap);
++            struct d2d_bitmap *tmp_impl = unsafe_impl_from_ID2D1Bitmap(tmp_bitmap);
++            ID3D11Device *t_resdev = NULL;
++            if (tmp_impl && tmp_impl->resource)
++                ID3D11Resource_GetDevice(tmp_impl->resource, &t_resdev);
++            if (0) fprintf(stderr, "YMM4DIAG: SetTarget %p bitmap %ux%u opts=%#x rtv=%p resdev=%p ctxdev=%p\n", (void *)target, ts.width, ts.height,
++                    tmp_impl ? tmp_impl->options : 0, tmp_impl ? (void *)tmp_impl->rtv : NULL,
++                    (void *)t_resdev, (void *)context->d3d_device);
++            if (t_resdev) ID3D11Device_Release(t_resdev);
++            ID2D1Bitmap_Release(tmp_bitmap);
++        }
++        else
++            if (0) fprintf(stderr, "YMM4DIAG: SetTarget %p\n", (void *)target);
++        fflush(stderr);
++    }
++
+     if (!target)
+     {
+         d2d_device_context_reset_target(context);
+@@ -2713,16 +2957,351 @@ static void STDMETHODCALLTYPE d2d_device_context_ID2D1DeviceContext_DrawGlyphRun
+     d2d_device_context_draw_glyph_run(context, baseline_origin, glyph_run, glyph_run_desc, brush, measuring_mode);
+ }
+ 
++/* YMM4 fix: internal command sink that replays command lists onto this device context. */
++struct d2d_command_sink
++{
++    ID2D1CommandSink ID2D1CommandSink_iface;
++    LONG refcount;
++    struct d2d_device_context *context;
++    unsigned int offset_valid;
++    D2D1_POINT_2F offset;
++};
++
++static inline struct d2d_command_sink *impl_from_ID2D1CommandSink(ID2D1CommandSink *iface)
++{
++    return CONTAINING_RECORD(iface, struct d2d_command_sink, ID2D1CommandSink_iface);
++}
++
++#define SINK_RT(sink) ((ID2D1RenderTarget *)&(sink)->context->ID2D1DeviceContext6_iface)
++#define SINK_DC(sink) ((ID2D1DeviceContext *)&(sink)->context->ID2D1DeviceContext6_iface)
++#define SINK_DC1(sink) ((ID2D1DeviceContext1 *)&(sink)->context->ID2D1DeviceContext6_iface)
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_QueryInterface(ID2D1CommandSink *iface, REFIID iid, void **out)
++{
++    if (IsEqualGUID(iid, &IID_ID2D1CommandSink) || IsEqualGUID(iid, &IID_IUnknown))
++    {
++        ID2D1CommandSink_AddRef(iface);
++        *out = iface;
++        return S_OK;
++    }
++
++    WARN("%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(iid));
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++
++static ULONG STDMETHODCALLTYPE d2d_command_sink_AddRef(ID2D1CommandSink *iface)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    return InterlockedIncrement(&sink->refcount);
++}
++
++static ULONG STDMETHODCALLTYPE d2d_command_sink_Release(ID2D1CommandSink *iface)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++    ULONG refcount = InterlockedDecrement(&sink->refcount);
++
++    if (!refcount)
++        free(sink);
++
++    return refcount;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_BeginDraw(ID2D1CommandSink *iface)
++{
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_EndDraw(ID2D1CommandSink *iface)
++{
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_SetAntialiasMode(ID2D1CommandSink *iface, D2D1_ANTIALIAS_MODE mode)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1RenderTarget_SetAntialiasMode(SINK_RT(sink), mode);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_SetTags(ID2D1CommandSink *iface, D2D1_TAG tag1, D2D1_TAG tag2)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1DeviceContext_SetTags(SINK_DC(sink), tag1, tag2);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_SetTextAntialiasMode(ID2D1CommandSink *iface,
++        D2D1_TEXT_ANTIALIAS_MODE mode)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1RenderTarget_SetTextAntialiasMode(SINK_RT(sink), mode);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_SetTextRenderingParams(ID2D1CommandSink *iface,
++        IDWriteRenderingParams *params)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1RenderTarget_SetTextRenderingParams(SINK_RT(sink), params);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_SetTransform(ID2D1CommandSink *iface, const D2D1_MATRIX_3X2_F *transform)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    if (sink->context->replay_offset_valid)
++    {
++        /* YMM4 compatibility: a target offset passed to DrawImage() shifts the
++         * whole replayed command list, including nested lists and any
++         * transforms the list records. */
++        D2D1_MATRIX_3X2_F t = *transform;
++        t._31 += sink->context->replay_offset.x;
++        t._32 += sink->context->replay_offset.y;
++        ID2D1RenderTarget_SetTransform(SINK_RT(sink), &t);
++    }
++    else
++    {
++        ID2D1RenderTarget_SetTransform(SINK_RT(sink), transform);
++    }
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_SetPrimitiveBlend(ID2D1CommandSink *iface, D2D1_PRIMITIVE_BLEND blend)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1DeviceContext1_SetPrimitiveBlend(SINK_DC1(sink), blend);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_SetUnitMode(ID2D1CommandSink *iface, D2D1_UNIT_MODE mode)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1DeviceContext1_SetUnitMode(SINK_DC1(sink), mode);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_Clear(ID2D1CommandSink *iface, const D2D1_COLOR_F *color)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1RenderTarget_Clear(SINK_RT(sink), color);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_DrawGlyphRun(ID2D1CommandSink *iface, D2D1_POINT_2F baseline_origin,
++        const DWRITE_GLYPH_RUN *glyph_run, const DWRITE_GLYPH_RUN_DESCRIPTION *glyph_run_desc, ID2D1Brush *brush,
++        DWRITE_MEASURING_MODE measuring_mode)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1DeviceContext_DrawGlyphRun(SINK_DC(sink), baseline_origin, glyph_run, glyph_run_desc, brush, measuring_mode);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_DrawLine(ID2D1CommandSink *iface, D2D1_POINT_2F p0, D2D1_POINT_2F p1,
++        ID2D1Brush *brush, float stroke_width, ID2D1StrokeStyle *stroke_style)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1RenderTarget_DrawLine(SINK_RT(sink), p0, p1, brush, stroke_width, stroke_style);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_DrawGeometry(ID2D1CommandSink *iface, ID2D1Geometry *geometry,
++        ID2D1Brush *brush, float stroke_width, ID2D1StrokeStyle *stroke_style)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1RenderTarget_DrawGeometry(SINK_RT(sink), geometry, brush, stroke_width, stroke_style);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_DrawRectangle(ID2D1CommandSink *iface, const D2D1_RECT_F *rect,
++        ID2D1Brush *brush, float stroke_width, ID2D1StrokeStyle *stroke_style)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1RenderTarget_DrawRectangle(SINK_RT(sink), rect, brush, stroke_width, stroke_style);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_DrawBitmap(ID2D1CommandSink *iface, ID2D1Bitmap *bitmap,
++        const D2D1_RECT_F *dst_rect, float opacity, D2D1_INTERPOLATION_MODE interpolation_mode,
++        const D2D1_RECT_F *src_rect, const D2D1_MATRIX_4X4_F *perspective_transform)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1DeviceContext1_DrawBitmap(SINK_DC1(sink), bitmap, dst_rect, opacity, interpolation_mode, src_rect,
++            perspective_transform);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_DrawImage(ID2D1CommandSink *iface, ID2D1Image *image,
++        const D2D1_POINT_2F *target_offset, const D2D1_RECT_F *image_rect, D2D1_INTERPOLATION_MODE interpolation_mode,
++        D2D1_COMPOSITE_MODE composite_mode)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1DeviceContext_DrawImage(SINK_DC(sink), image, target_offset, image_rect, interpolation_mode, composite_mode);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_DrawGdiMetafile(ID2D1CommandSink *iface, ID2D1GdiMetafile *metafile,
++        const D2D1_POINT_2F *target_offset)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1DeviceContext1_DrawGdiMetafile(SINK_DC1(sink), metafile, target_offset);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_FillMesh(ID2D1CommandSink *iface, ID2D1Mesh *mesh, ID2D1Brush *brush)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1RenderTarget_FillMesh(SINK_RT(sink), mesh, brush);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_FillOpacityMask(ID2D1CommandSink *iface, ID2D1Bitmap *bitmap,
++        ID2D1Brush *brush, const D2D1_RECT_F *dst_rect, const D2D1_RECT_F *src_rect)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1DeviceContext_FillOpacityMask(SINK_DC(sink), bitmap, brush, dst_rect, src_rect);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_FillGeometry(ID2D1CommandSink *iface, ID2D1Geometry *geometry,
++        ID2D1Brush *brush, ID2D1Brush *opacity_brush)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1RenderTarget_FillGeometry(SINK_RT(sink), geometry, brush, opacity_brush);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_FillRectangle(ID2D1CommandSink *iface, const D2D1_RECT_F *rect,
++        ID2D1Brush *brush)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1RenderTarget_FillRectangle(SINK_RT(sink), rect, brush);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_PushAxisAlignedClip(ID2D1CommandSink *iface, const D2D1_RECT_F *rect,
++        D2D1_ANTIALIAS_MODE mode)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1RenderTarget_PushAxisAlignedClip(SINK_RT(sink), rect, mode);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_PushLayer(ID2D1CommandSink *iface,
++        const D2D1_LAYER_PARAMETERS1 *params, ID2D1Layer *layer)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1DeviceContext_PushLayer(SINK_DC(sink), params, layer);
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_PopAxisAlignedClip(ID2D1CommandSink *iface)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1RenderTarget_PopAxisAlignedClip(SINK_RT(sink));
++    return S_OK;
++}
++
++static HRESULT STDMETHODCALLTYPE d2d_command_sink_PopLayer(ID2D1CommandSink *iface)
++{
++    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++
++    ID2D1RenderTarget_PopLayer(SINK_RT(sink));
++    return S_OK;
++}
++
++static const ID2D1CommandSinkVtbl d2d_command_sink_vtbl =
++{
++    d2d_command_sink_QueryInterface,
++    d2d_command_sink_AddRef,
++    d2d_command_sink_Release,
++    d2d_command_sink_BeginDraw,
++    d2d_command_sink_EndDraw,
++    d2d_command_sink_SetAntialiasMode,
++    d2d_command_sink_SetTags,
++    d2d_command_sink_SetTextAntialiasMode,
++    d2d_command_sink_SetTextRenderingParams,
++    d2d_command_sink_SetTransform,
++    d2d_command_sink_SetPrimitiveBlend,
++    d2d_command_sink_SetUnitMode,
++    d2d_command_sink_Clear,
++    d2d_command_sink_DrawGlyphRun,
++    d2d_command_sink_DrawLine,
++    d2d_command_sink_DrawGeometry,
++    d2d_command_sink_DrawRectangle,
++    d2d_command_sink_DrawBitmap,
++    d2d_command_sink_DrawImage,
++    d2d_command_sink_DrawGdiMetafile,
++    d2d_command_sink_FillMesh,
++    d2d_command_sink_FillOpacityMask,
++    d2d_command_sink_FillGeometry,
++    d2d_command_sink_FillRectangle,
++    d2d_command_sink_PushAxisAlignedClip,
++    d2d_command_sink_PushLayer,
++    d2d_command_sink_PopAxisAlignedClip,
++    d2d_command_sink_PopLayer,
++};
++
++static HRESULT d2d_command_sink_create(struct d2d_device_context *context, ID2D1CommandSink **sink)
++{
++    struct d2d_command_sink *object;
++
++    if (!(object = calloc(1, sizeof(*object))))
++        return E_OUTOFMEMORY;
++
++    object->ID2D1CommandSink_iface.lpVtbl = &d2d_command_sink_vtbl;
++    object->refcount = 1;
++    object->context = context;
++
++    *sink = &object->ID2D1CommandSink_iface;
++    return S_OK;
++}
++
+ static void STDMETHODCALLTYPE d2d_device_context_DrawImage(ID2D1DeviceContext6 *iface, ID2D1Image *image,
+         const D2D1_POINT_2F *target_offset, const D2D1_RECT_F *image_rect, D2D1_INTERPOLATION_MODE interpolation_mode,
+         D2D1_COMPOSITE_MODE composite_mode)
+ {
+     struct d2d_device_context *context = impl_from_ID2D1DeviceContext(iface);
+     ID2D1Bitmap *bitmap;
++    ID2D1CommandList *command_list;
+ 
+     TRACE("iface %p, image %p, target_offset %s, image_rect %s, interpolation_mode %#x, composite_mode %#x.\n",
+             iface, image, debug_d2d_point_2f(target_offset), debug_d2d_rect_f(image_rect),
+             interpolation_mode, composite_mode);
++    if (0) fprintf(stderr, "YMM4DIAG: DrawImage img=%p", (void *)image);
++    if (!image_rect) fprintf(stderr, " rect=N");
++    else fprintf(stderr, " rect=(%.1f,%.1f,%.1f,%.1f)", image_rect->left, image_rect->top, image_rect->right, image_rect->bottom);
++    if (!target_offset) fprintf(stderr, " off=N");
++    else fprintf(stderr, " off=(%.1f,%.1f)", target_offset->x, target_offset->y);
++    {
++        D2D1_MATRIX_3X2_F ct = context->drawing_state.transform;
++        fprintf(stderr, " ctxT=(%.1f,%.1f,%.1f,%.1f,%.1f,%.1f)", ct._11, ct._12, ct._21, ct._22, ct._31, ct._32);
++    }
++    fprintf(stderr, " err=%#lx", (unsigned long)context->error.code);
++    fprintf(stderr, "\n"); fflush(stderr);
+ 
+     if (FAILED(context->error.code))
+         return;
+@@ -2745,12 +3324,242 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawImage(ID2D1DeviceContext6 *
+ 
+     if (SUCCEEDED(ID2D1Image_QueryInterface(image, &IID_ID2D1Bitmap, (void **)&bitmap)))
+     {
+-        d2d_device_context_draw_bitmap(context, bitmap, NULL, 1.0f, interpolation_mode, image_rect, target_offset, NULL);
++        D2D1_SIZE_U bsz = ID2D1Bitmap_GetPixelSize(bitmap);
++        D2D1_POINT_2F adj_off;
++        const D2D1_POINT_2F *use_offset = target_offset;
++        ID2D1Bitmap *target_bitmap = NULL;
++
++        if (0) fprintf(stderr, "YMM4DIAG:   bitmap %p size %ux%u\n", (void *)bitmap, bsz.width, bsz.height); fflush(stderr);
++
++        /* YMM4 composes in a center-origin canvas space. When blitting a leaf
++         * bitmap onto a real target, add the target center. */
++        if (target_offset && !context->replay_depth && !context->effect_depth && context->target.type != D2D_TARGET_COMMAND_LIST
++                && SUCCEEDED(ID2D1Image_QueryInterface((ID2D1Image *)context->target.object, &IID_ID2D1Bitmap, (void **)&target_bitmap)))
++        {
++            D2D1_SIZE_U ts = ID2D1Bitmap_GetPixelSize(target_bitmap);
++            adj_off.x = target_offset->x + ts.width / 2.0f;
++            adj_off.y = target_offset->y + ts.height / 2.0f;
++            use_offset = &adj_off;
++            ID2D1Bitmap_Release(target_bitmap);
++            if (0) fprintf(stderr, "YMM4DIAG:   shifted off=(%.1f,%.1f)\n", adj_off.x, adj_off.y); fflush(stderr);
++        }
++
++#if 0
++        /* YMM4 diag: dump the source bitmap content (every 10th). */
++        {
++            static unsigned int leaf_n;
++            if (++leaf_n % 10 == 1)
++            {
++                struct d2d_bitmap *lbi = unsafe_impl_from_ID2D1Bitmap(bitmap);
++                if (lbi && lbi->resource)
++                {
++                    ID3D11Texture2D *ltex;
++                    if (SUCCEEDED(ID3D11Resource_QueryInterface(lbi->resource, &IID_ID3D11Texture2D, (void **)&ltex)))
++                    {
++                        D3D11_TEXTURE2D_DESC lsd;
++                        ID3D11Texture2D_GetDesc(ltex, &lsd);
++                        {
++                            D3D11_TEXTURE2D_DESC ldd = lsd;
++                            ID3D11Texture2D *lst = NULL;
++                            ldd.Usage = D3D11_USAGE_STAGING;
++                            ldd.BindFlags = 0;
++                            ldd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
++                            ldd.MiscFlags = 0;
++                            if (SUCCEEDED(ID3D11Device_CreateTexture2D((ID3D11Device *)context->d3d_device, &ldd, NULL, &lst)))
++                            {
++                                ID3D11DeviceContext1 *ldc = NULL;
++                                ID3D11Device1_GetImmediateContext1(context->d3d_device, &ldc);
++                                if (ldc)
++                                {
++                                    D3D11_MAPPED_SUBRESOURCE lmap;
++                                    ID3D11DeviceContext_CopyResource((ID3D11DeviceContext *)ldc, (ID3D11Resource *)lst, lbi->resource);
++                                    if (SUCCEEDED(ID3D11DeviceContext_Map((ID3D11DeviceContext *)ldc, (ID3D11Resource *)lst, 0, D3D11_MAP_READ, 0, &lmap)))
++                                    {
++                                        const BYTE *lb = lmap.pData;
++                                        unsigned int lr = lmap.RowPitch;
++                                        unsigned long long lc[3] = {0,0,0};
++                                        unsigned int ln = 0, gx2, gy2;
++                                        for (gy2 = 0; gy2 < 4; gy2++) for (gx2 = 0; gx2 < 4; gx2++)
++                                        {
++                                            unsigned int lx = gx2 * (lsd.Width / 4) + 4, ly = gy2 * (lsd.Height / 4) + 4, ax2, ay2;
++                                            for (ay2 = ly; ay2 < ly + 8 && ay2 < lsd.Height; ay2++)
++                                            {
++                                                const BYTE *lp = lb + (size_t)ay2 * lr + (size_t)lx * 4;
++                                                for (ax2 = lx; ax2 < lx + 8 && ax2 < lsd.Width; ax2++, lp += 4)
++                                                { lc[0] += lp[2]; lc[1] += lp[1]; lc[2] += lp[0]; ln++; }
++                                            }
++                                        }
++                                        if (0) fprintf(stderr, "YMM4DIAG: LEAF %ux%u #%u avgRGB=(%u,%u,%u)\n", lsd.Width, lsd.Height, leaf_n,
++                                                ln ? (unsigned)(lc[0]/ln) : 0, ln ? (unsigned)(lc[1]/ln) : 0, ln ? (unsigned)(lc[2]/ln) : 0);
++                                        fflush(stderr);
++                                        ID3D11DeviceContext_Unmap((ID3D11DeviceContext *)ldc, (ID3D11Resource *)lst, 0);
++                                    }
++                                    ID3D11DeviceContext1_Release(ldc);
++                                }
++                                ID3D11Texture2D_Release(lst);
++                            }
++                        }
++                        ID3D11Texture2D_Release(ltex);
++                    }
++                }
++            }
++        }
++
++#endif
++        d2d_device_context_draw_bitmap(context, bitmap, NULL, 1.0f, interpolation_mode, image_rect, use_offset, NULL);
++
++#if 0
++        /* YMM4 diag: solid red probe fill to test whether writes reach the target. */
++        {
++            ID2D1SolidColorBrush *dbg_sb = NULL;
++            D2D1_COLOR_F dbg_c = {1.0f, 0.0f, 0.0f, 1.0f};
++            D2D1_BRUSH_PROPERTIES dbg_bp = {{1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f}, 1.0f};
++            if (SUCCEEDED(ID2D1DeviceContext_CreateSolidColorBrush((ID2D1DeviceContext *)&context->ID2D1DeviceContext6_iface,
++                    &dbg_c, &dbg_bp, &dbg_sb)))
++            {
++                D2D1_RECT_F dbg_r = {0.0f, 0.0f, 120.0f, 120.0f};
++                ID2D1RenderTarget_FillRectangle((ID2D1RenderTarget *)&context->ID2D1DeviceContext6_iface,
++                        &dbg_r, (ID2D1Brush *)dbg_sb);
++                if (0) fprintf(stderr, "YMM4DIAG: PROBE red fill issued err=%#lx target_type=%d\n",
++                        (unsigned long)context->error.code, context->target.type); fflush(stderr);
++                ID2D1SolidColorBrush_Release(dbg_sb);
++            }
++        }
+ 
++#endif
+         ID2D1Bitmap_Release(bitmap);
+         return;
+     }
+ 
++    /* YMM4 fix: replay command lists onto the target. */
++    if (SUCCEEDED(ID2D1Image_QueryInterface(image, &IID_ID2D1CommandList, (void **)&command_list)))
++    {
++        ID2D1CommandSink *sink;
++
++        if (SUCCEEDED(d2d_command_sink_create(context, &sink)))
++        {
++            unsigned int saved_valid = context->replay_offset_valid;
++            D2D1_POINT_2F saved_offset = context->replay_offset;
++
++            if (target_offset)
++            {
++                context->replay_offset_valid = 1;
++                context->replay_offset = *target_offset;
++            }
++            context->replay_depth++;
++            ID2D1CommandList_Stream(command_list, sink);
++            context->replay_depth--;
++            context->replay_offset_valid = saved_valid;
++            context->replay_offset = saved_offset;
++            ID2D1CommandSink_Release(sink);
++        }
++
++        ID2D1CommandList_Release(command_list);
++        return;
++    }
++
++    /* YMM4 fix: approximate rendering of the built-in D2D effect graph. */
++    {
++        static const CLSID clsid_2daffine = {0x6aa97485,0x6354,0x4cfc,{0x90,0x8c,0xe4,0xa7,0x4f,0x62,0xc9,0x6c}};
++        static const CLSID clsid_3dtransform = {0xe8467b04,0xec61,0x4b8a,{0xb5,0xde,0xd4,0xd7,0x3d,0xeb,0xea,0x5a}};
++        static const CLSID clsid_crop = {0xe23f7110,0x0e9a,0x4324,{0xaf,0x47,0x6a,0x2c,0x0c,0x46,0xf3,0x5b}};
++        ID2D1Effect *effect;
++        if (SUCCEEDED(ID2D1Image_QueryInterface(image, &IID_ID2D1Effect, (void **)&effect)))
++        {
++            ID2D1RenderTarget *rt = (ID2D1RenderTarget *)&context->ID2D1DeviceContext6_iface;
++            ID2D1Image *input = NULL;
++            CLSID id;
++            D2D1_MATRIX_3X2_F old_transform;
++            BOOL have_transform = FALSE, have_clip = FALSE, center_compensated = FALSE;
++            D2D1_MATRIX_3X2_F saved_transform;
++            D2D1_RECT_F clip_rect;
++
++            /* YMM4 compatibility: content is composed in a center-origin space.
++             * Compensate once at the outermost effect of a direct draw. */
++            ID2D1RenderTarget_GetTransform(rt, &saved_transform);
++            if (!context->replay_depth && !context->effect_depth && context->target.type == D2D_TARGET_BITMAP
++                    && context->target.bitmap)
++            {
++                D2D1_MATRIX_3X2_F t = saved_transform;
++                t._31 += context->target.bitmap->pixel_size.width / 2.0f;
++                t._32 += context->target.bitmap->pixel_size.height / 2.0f;
++                ID2D1RenderTarget_SetTransform(rt, &t);
++                center_compensated = TRUE;
++                if (0) fprintf(stderr, "YMM4DIAG: chain center-compensated (%.1f,%.1f)\n", t._31, t._32); fflush(stderr);
++            }
++
++            memset(&id, 0, sizeof(id));
++            ID2D1Effect_GetValue(effect, D2D1_PROPERTY_CLSID, D2D1_PROPERTY_TYPE_CLSID, (BYTE *)&id, sizeof(id));
++            if (0) fprintf(stderr, "YMM4DIAG:   effect %s\n", debugstr_guid(&id)); fflush(stderr);
++
++            if (IsEqualGUID(&id, &clsid_2daffine) || IsEqualGUID(&id, &clsid_3dtransform))
++            {
++                D2D1_MATRIX_3X2_F m;
++                HRESULT ghr;
++                memset(&m, 0, sizeof(m));
++                m._11 = m._22 = 1.0f;
++                if (IsEqualGUID(&id, &clsid_2daffine))
++                {
++                    ghr = ID2D1Effect_GetValue(effect, 2 /*TRANSFORM_MATRIX*/, D2D1_PROPERTY_TYPE_MATRIX_3X2, (BYTE *)&m, sizeof(m));
++                }
++                else
++                {
++                    D2D1_MATRIX_4X4_F m4;
++                    memset(&m4, 0, sizeof(m4));
++                    ghr = ID2D1Effect_GetValue(effect, 2 /*TRANSFORM_MATRIX*/, D2D1_PROPERTY_TYPE_MATRIX_4X4, (BYTE *)&m4, sizeof(m4));
++                    m._11 = m4._11; m._12 = m4._12; m._21 = m4._21; m._22 = m4._22;
++                    m._31 = m4._41; m._32 = m4._42;
++                    if (0) fprintf(stderr, "YMM4DIAG: 4x4 hr=%#lx .11=%.3f .12=%.3f .21=%.3f .22=%.3f .41=%.3f .42=%.3f .14=%.3f .24=%.3f .44=%.3f\n",
++                            (unsigned long)ghr, m4._11, m4._12, m4._21, m4._22, m4._41, m4._42, m4._14, m4._24, m4._44); fflush(stderr);
++                }
++                if (0) fprintf(stderr, "YMM4DIAG: 2x2 hr=%#lx m=%.3f %.3f %.3f %.3f %.3f %.3f\n",
++                        (unsigned long)(IsEqualGUID(&id, &clsid_2daffine) ? ghr : 0), m._11, m._12, m._21, m._22, m._31, m._32); fflush(stderr);
++                ID2D1RenderTarget_GetTransform(rt, &old_transform);
++                {
++                    D2D1_MATRIX_3X2_F combined;
++                    combined._11 = m._11 * old_transform._11 + m._12 * old_transform._21;
++                    combined._12 = m._11 * old_transform._12 + m._12 * old_transform._22;
++                    combined._21 = m._21 * old_transform._11 + m._22 * old_transform._21;
++                    combined._22 = m._21 * old_transform._12 + m._22 * old_transform._22;
++                    combined._31 = m._31 * old_transform._11 + m._32 * old_transform._21 + old_transform._31;
++                    combined._32 = m._31 * old_transform._12 + m._32 * old_transform._22 + old_transform._32;
++                    if (0) fprintf(stderr, "YMM4DIAG: transform (%s) applied\n", debugstr_guid(&id)); fflush(stderr);
++                    ID2D1RenderTarget_SetTransform(rt, &combined);
++                    have_transform = TRUE;
++                }
++            }
++            else if (IsEqualGUID(&id, &clsid_crop))
++            {
++                D2D1_VECTOR_4F v4;
++                if (SUCCEEDED(ID2D1Effect_GetValue(effect, 0 /*RECT*/, D2D1_PROPERTY_TYPE_VECTOR4, (BYTE *)&v4, sizeof(v4))))
++                {
++                    /* Skip "infinite" crop rects (default = no crop). */
++                    if (v4.x > -1.0e7f && v4.y > -1.0e7f && v4.z < 1.0e7f && v4.w < 1.0e7f)
++                    {
++                        clip_rect.left = v4.x; clip_rect.top = v4.y; clip_rect.right = v4.z; clip_rect.bottom = v4.w;
++                        if (0) fprintf(stderr, "YMM4DIAG: crop (%.1f,%.1f)-(%.1f,%.1f)\n", v4.x, v4.y, v4.z, v4.w); fflush(stderr);
++                        ID2D1RenderTarget_PushAxisAlignedClip(rt, &clip_rect, D2D1_ANTIALIAS_MODE_ALIASED);
++                        have_clip = TRUE;
++                    }
++                }
++            }
++
++            ID2D1Effect_GetInput(effect, 0, &input);
++            if (input)
++            {
++                context->effect_depth++;
++                d2d_device_context_DrawImage(iface, input, target_offset, image_rect, interpolation_mode, composite_mode);
++                context->effect_depth--;
++                ID2D1Image_Release(input);
++            }
++            if (have_clip) ID2D1RenderTarget_PopAxisAlignedClip(rt);
++            if (have_transform) ID2D1RenderTarget_SetTransform(rt, &old_transform);
++            if (center_compensated) ID2D1RenderTarget_SetTransform(rt, &saved_transform);
++            ID2D1Effect_Release(effect);
++            return;
++        }
++    }
++
+     FIXME("Unhandled image %p.\n", image);
+ }
+ 
+@@ -2771,6 +3580,12 @@ static void STDMETHODCALLTYPE d2d_device_context_ID2D1DeviceContext_DrawBitmap(I
+             "src_rect %s, perspective_transform %p.\n",
+             iface, bitmap, debug_d2d_rect_f(dst_rect), opacity, interpolation_mode,
+             debug_d2d_rect_f(src_rect), perspective_transform);
++    {
++        D2D1_MATRIX_3X2_F ct = context->drawing_state.transform;
++        if (0) fprintf(stderr, "YMM4DIAG: DrawBitmapDC dst=(%.0f,%.0f,%.0f,%.0f) src=%s ctxT=(%.1f,%.1f,%.1f,%.1f,%.1f,%.1f) tgt_type=%d\n",
++                dst_rect?dst_rect->left:0, dst_rect?dst_rect->top:0, dst_rect?dst_rect->right:0, dst_rect?dst_rect->bottom:0,
++                src_rect?"Y":"N", ct._11, ct._12, ct._21, ct._22, ct._31, ct._32, context->target.type); fflush(stderr);
++    }
+ 
+     if (FAILED(context->error.code))
+         return;
+diff --git a/dlls/d2d1/effect.c b/dlls/d2d1/effect.c
+index fde640b3..a978486b 100644
+--- a/dlls/d2d1/effect.c
++++ b/dlls/d2d1/effect.c
+@@ -17,6 +17,7 @@
+  */
+ 
+ #include "d2d1_private.h"
++#include <stdio.h>
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(d2d);
+ 
+@@ -1865,6 +1866,80 @@ static HRESULT __stdcall _3d_transform_factory(IUnknown **effect)
+     return d2d_effect_create_impl(effect, &properties, sizeof(properties));
+ }
+ 
++static const CLSID opacity_metadata_clsid = {0x6c53006a,0x4450,0x4199,{0xaa,0x5b,0xad,0x16,0x56,0xfe,0xce,0x5e}};
++static const CLSID opacity_clsid = {0x811d79a4,0xde28,0x4454,{0x80,0x94,0xc6,0x46,0x85,0xf8,0xbd,0x4c}};
++
++static const WCHAR opacity_metadata_description[] =
++L"<?xml version='1.0'?>                                                   \\
++  <Effect>                                                                \\
++    <Property name='DisplayName' type='string' value='Opacity metadata'/> \\
++    <Property name='Author'      type='string' value='The Wine Project'/> \\
++    <Property name='Category'    type='string' value='Stub'/>             \\
++    <Property name='Description' type='string' value='Opacity metadata'/> \\
++    <Inputs>                                                              \\
++      <Input name='Source'/>                                              \\
++    </Inputs>                                                             \\
++  </Effect>";
++
++static HRESULT __stdcall opacity_metadata_factory(IUnknown **effect)
++{
++    return d2d_effect_create_impl(effect, NULL, 0);
++}
++
++static const WCHAR opacity_description[] =
++L"<?xml version='1.0'?>                                                   \\
++  <Effect>                                                                \\
++    <Property name='DisplayName' type='string' value='Opacity'/>          \\
++    <Property name='Author'      type='string' value='The Wine Project'/> \\
++    <Property name='Category'    type='string' value='Stub'/>             \\
++    <Property name='Description' type='string' value='Opacity'/>          \\
++    <Inputs>                                                              \\
++      <Input name='Source'/>                                              \\
++    </Inputs>                                                             \\
++    <Property name='Opacity' type='float'/>                               \\
++  </Effect>";
++
++struct opacity_properties
++{
++    float opacity;
++};
++
++EFFECT_PROPERTY_RW(opacity, opacity, FLOAT)
++
++static const D2D1_PROPERTY_BINDING opacity_bindings[] =
++{
++    { L"Opacity", BINDING_RW(opacity, opacity) },
++};
++
++static HRESULT __stdcall opacity_factory(IUnknown **effect)
++{
++    static const struct opacity_properties properties =
++    {
++        .opacity = 1.0f,
++    };
++    return d2d_effect_create_impl(effect, &properties, sizeof(properties));
++}
++
++static const CLSID alpha_mask_clsid = {0xc80ecff0,0x3fd5,0x4f05,{0x83,0x28,0xc5,0xd1,0x72,0x4b,0x4f,0x0a}};
++
++static const WCHAR alpha_mask_description[] =
++L"<?xml version='1.0'?>                                                   \\
++  <Effect>                                                                \\
++    <Property name='DisplayName' type='string' value='Alpha mask'/>       \\
++    <Property name='Author'      type='string' value='The Wine Project'/> \\
++    <Property name='Category'    type='string' value='Stub'/>             \\
++    <Property name='Description' type='string' value='Alpha mask'/>       \\
++    <Inputs>                                                              \\
++      <Input name='Source'/>                                              \\
++      <Input name='Mask'/>                                                \\
++    </Inputs>                                                             \\
++  </Effect>";
++
++static HRESULT __stdcall alpha_mask_factory(IUnknown **effect)
++{
++    return d2d_effect_create_impl(effect, NULL, 0);
++}
++
+ void d2d_effects_init_builtins(struct d2d_factory *factory)
+ {
+     static const struct builtin_description
+@@ -1898,6 +1973,9 @@ void d2d_effects_init_builtins(struct d2d_factory *factory)
+         { &CLSID_D2D1Scale, X2(scale) },
+         { &CLSID_D2D1Premultiply, X(premultiply) },
+         { &CLSID_D2D13DTransform, X2(_3d_transform) },
++        { &alpha_mask_clsid, X(alpha_mask) },
++        { &opacity_metadata_clsid, X(opacity_metadata) },
++        { &opacity_clsid, X2(opacity) },
+ #undef X2
+ #undef X
+     };
+@@ -2189,6 +2267,7 @@ static UINT32 d2d_effect_properties_get_value_size(const struct d2d_effect_prope
+ 
+     if (prop->get_function)
+     {
++        if (effect->impl_broken) return prop->size;
+         if (FAILED(prop->get_function((IUnknown *)effect->impl, NULL, 0, &size))) return 0;
+         return size;
+     }
+@@ -2224,7 +2303,14 @@ static HRESULT d2d_effect_property_get_value(const struct d2d_effect_properties
+     }
+ 
+     if (get_function)
++    {
++        if (effect->impl_broken)
++        {
++            memset(value, 0, size);
++            return S_OK;
++        }
+         return get_function((IUnknown *)effect->impl, value, size, &actual_size);
++    }
+ 
+     switch (prop->type)
+     {
+@@ -2258,7 +2344,10 @@ static HRESULT d2d_effect_property_set_value(struct d2d_effect_properties *prope
+     if (prop->index < 0x80000000 && !prop->set_function) return E_INVALIDARG;
+ 
+     if (prop->set_function)
++    {
++        if (effect->impl_broken) return S_OK;
+         return prop->set_function((IUnknown *)effect->impl, value, size);
++    }
+ 
+     if (prop->size != size) return E_INVALIDARG;
+ 
+@@ -2810,6 +2899,20 @@ static HRESULT STDMETHODCALLTYPE d2d_effect_SetValue(ID2D1Effect *iface, UINT32
+ 
+     TRACE("iface %p, index %#x, type %u, value %p, value_size %u.\n", iface, index, type, value, value_size);
+ 
++    {
++        const float *f = (const float *)value;
++        if (0) fprintf(stderr, "YMM4DIAG: SetValue idx=%u type=%u size=%u", index, type, value_size);
++        if (value && value_size)
++            fprintf(stderr, " f=(%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f)",
++                    value_size >= 4 ? f[0] : 0.0f, value_size >= 8 ? f[1] : 0.0f,
++                    value_size >= 12 ? f[2] : 0.0f, value_size >= 16 ? f[3] : 0.0f,
++                    value_size >= 20 ? f[4] : 0.0f, value_size >= 24 ? f[5] : 0.0f,
++                    value_size >= 28 ? f[6] : 0.0f, value_size >= 32 ? f[7] : 0.0f);
++        else
++            fprintf(stderr, " val=NULL");
++        fprintf(stderr, "\n"); fflush(stderr);
++    }
++
+     return ID2D1Properties_SetValue(&effect->properties.ID2D1Properties_iface, index, type,
+             value, value_size);
+ }
+@@ -2914,7 +3017,8 @@ static HRESULT d2d_effect_set_input_count(struct d2d_effect *effect, UINT32 coun
+ 
+         if (SUCCEEDED(hr = d2d_transform_graph_create(count, &effect->graph)))
+         {
+-            if (FAILED(hr = ID2D1EffectImpl_SetGraph(effect->impl, &effect->graph->ID2D1TransformGraph_iface)))
++            if (effect->impl && !effect->impl_broken
++                    && FAILED(hr = ID2D1EffectImpl_SetGraph(effect->impl, &effect->graph->ID2D1TransformGraph_iface)))
+                 WARN("Failed to set a new transform graph, hr %#lx.\n", hr);
+         }
+     }
+@@ -3539,16 +3643,31 @@ HRESULT d2d_effect_create(struct d2d_device_context *context, const CLSID *effec
+     if (FAILED(hr = ID2D1EffectImpl_Initialize(object->impl, &effect_context->ID2D1EffectContext_iface,
+             &object->graph->ID2D1TransformGraph_iface)))
+     {
+-        WARN("Failed to initialize effect, hr %#lx.\n", hr);
+-        ID2D1Effect_Release(&object->ID2D1Effect_iface);
+-        return hr;
++        /* YMM4 compatibility: custom effects may need effect context or
++         * transform graph API that is still stubbed.  Keep the constructed
++         * implementation object instead of failing; rendering falls back to a
++         * pass-through approximation. */
++        if (hr != E_NOTIMPL)
++        {
++            WARN("Failed to initialize effect, hr %#lx.\n", hr);
++            ID2D1Effect_Release(&object->ID2D1Effect_iface);
++            return hr;
++        }
++        WARN("Effect implementation initialize not supported, using pass-through, id %s.\n",
++                wine_dbgstr_guid(effect_id));
++        object->impl_broken = TRUE;
+     }
+ 
+     if (FAILED(hr = d2d_effect_transform_graph_initialize_nodes(object->graph)))
+     {
+-        WARN("Failed to initialize graph nodes, hr %#lx.\n", hr);
+-        ID2D1Effect_Release(&object->ID2D1Effect_iface);
+-        return hr;
++        if (hr != E_NOTIMPL)
++        {
++            WARN("Failed to initialize graph nodes, hr %#lx.\n", hr);
++            ID2D1Effect_Release(&object->ID2D1Effect_iface);
++            return hr;
++        }
++        WARN("Graph node initialization not supported, using pass-through.\n");
++        object->impl_broken = TRUE;
+     }
+ 
+     *effect = &object->ID2D1Effect_iface;
+diff --git a/dlls/winex11.drv/init.c b/dlls/winex11.drv/init.c
+index cf032cb3..5933260d 100644
+--- a/dlls/winex11.drv/init.c
++++ b/dlls/winex11.drv/init.c
+@@ -26,6 +26,7 @@
+ 
+ #include <stdarg.h>
+ #include <string.h>
++#include <stdlib.h>
+ #include <assert.h>
+ 
+ #include "windef.h"
+@@ -223,7 +224,8 @@ static BOOL needs_client_window_clipping( HWND hwnd )
+ static BOOL needs_offscreen_rendering( HWND hwnd, BOOL raw )
+ {
+     if (!raw && NtUserGetDpiForWindow( hwnd ) != NtUserGetWinMonitorDpi( hwnd, MDT_RAW_DPI )) return TRUE; /* needs DPI scaling */
+-    if (NtUserGetAncestor( hwnd, GA_PARENT ) != NtUserGetDesktopWindow()) return TRUE; /* child window, needs compositing */
++    if (!getenv( "WINE_X11_CHILD_SURFACE_ATTACH" ) &&
++        NtUserGetAncestor( hwnd, GA_PARENT ) != NtUserGetDesktopWindow()) return TRUE; /* child window, needs compositing */
+     if (NtUserGetWindowRelative( hwnd, GW_CHILD )) return needs_client_window_clipping( hwnd ); /* window has children, needs compositing */
+     return FALSE;
+ }
+@@ -293,6 +295,22 @@ static void client_surface_update_geometry( HWND hwnd, struct x11drv_client_surf
+     XWindowChanges changes = surface->changes;
+     int mask = 0;
+ 
++    if (getenv( "WINE_X11_CHILD_SURFACE_ATTACH" ) && NtUserGetAncestor( hwnd, GA_PARENT ) != NtUserGetDesktopWindow())
++    {
++        /* YMM4 fix: keep an attached child surface window at its position relative to the toplevel */
++        HWND toplevel = NtUserGetAncestor( hwnd, GA_ROOT );
++        RECT wrect, trect;
++        if (toplevel &&
++            NtUserGetWindowRect( hwnd, &wrect, NtUserGetDpiForWindow( hwnd ) ) &&
++            NtUserGetWindowRect( toplevel, &trect, NtUserGetDpiForWindow( toplevel ) ))
++        {
++            rect.left = wrect.left - trect.left;
++            rect.top = wrect.top - trect.top;
++            rect.right = rect.left + (wrect.right - wrect.left);
++            rect.bottom = rect.top + (wrect.bottom - wrect.top);
++        }
++    }
++
+     changes.x = rect.left;
+     changes.y = rect.top;
+     changes.width  = min( max( 1, rect.right - rect.left ), 65535 );
+diff --git a/dlls/winex11.drv/window.c b/dlls/winex11.drv/window.c
+index d7df0a85..2f1d5096 100644
+--- a/dlls/winex11.drv/window.c
++++ b/dlls/winex11.drv/window.c
+@@ -2322,22 +2322,60 @@ void detach_client_window( struct x11drv_win_data *data, Window client_window )
+ /**********************************************************************
+  *             attach_client_window
+  */
+-void attach_client_window( struct x11drv_win_data *data, Window client_window )
++static void attach_child_window_to_toplevel( struct x11drv_win_data *data, Window client_window )
+ {
+-    if (data->client_window == client_window || !client_window) return;
++    static Window last_child, last_parent;
++    HWND toplevel = NtUserGetAncestor( data->hwnd, GA_ROOT );
++    struct x11drv_win_data *tdata;
++    RECT wrect, trect;
+ 
+-    TRACE( "%p/%lx attaching client window %lx\n", data->hwnd, data->whole_window, client_window );
++    if (!toplevel || !(tdata = get_win_data( toplevel ))) return;
++    if (tdata->whole_window && (client_window != last_child || tdata->whole_window != last_parent))
++    {
++        if (NtUserGetWindowRect( data->hwnd, &wrect, NtUserGetDpiForWindow( data->hwnd ) ) &&
++            NtUserGetWindowRect( toplevel, &trect, NtUserGetDpiForWindow( toplevel ) ))
++        {
++            WARN( "attach-child: %p window %lx -> %lx at %d,%d size %dx%d\n", data->hwnd, client_window, tdata->whole_window,
++                  (int)(wrect.left - trect.left), (int)(wrect.top - trect.top),
++                  (int)(wrect.right - wrect.left), (int)(wrect.bottom - wrect.top) );
++            client_window_events_enable( data, client_window );
++            XReparentWindow( gdi_display, client_window, tdata->whole_window,
++                             wrect.left - trect.left, wrect.top - trect.top );
++            XMoveResizeWindow( gdi_display, client_window, wrect.left - trect.left, wrect.top - trect.top,
++                               wrect.right - wrect.left, wrect.bottom - wrect.top );
++            XMapRaised( gdi_display, client_window );
++            XFlush( gdi_display );
++            last_child = client_window;
++            last_parent = tdata->whole_window;
++        }
++    }
++    release_win_data( tdata );
++}
+ 
+-    detach_client_window( data, data->client_window );
++void attach_client_window( struct x11drv_win_data *data, Window client_window )
++{
++    if (!client_window) return;
+ 
+-    if (data->whole_window)
++    if (data->client_window != client_window)
+     {
+-        client_window_events_enable( data, client_window );
+-        XReparentWindow( gdi_display, client_window, data->whole_window, data->rects.client.left - data->rects.visible.left,
+-                         data->rects.client.top - data->rects.visible.top );
++        TRACE( "%p/%lx attaching client window %lx\n", data->hwnd, data->whole_window, client_window );
++
++        detach_client_window( data, data->client_window );
++
++        if (data->whole_window)
++        {
++            client_window_events_enable( data, client_window );
++            XReparentWindow( gdi_display, client_window, data->whole_window, data->rects.client.left - data->rects.visible.left,
++                             data->rects.client.top - data->rects.visible.top );
++        }
++
++        data->client_window = client_window;
+     }
+ 
+-    data->client_window = client_window;
++    /* YMM4 fix: attach child surface windows to the toplevel X window so that native D3D/Vulkan
++     * presents (DXVK) show directly. Gated by env var WINE_X11_CHILD_SURFACE_ATTACH. */
++    if (!data->whole_window && getenv( "WINE_X11_CHILD_SURFACE_ATTACH" ))
++        attach_child_window_to_toplevel( data, client_window );
+ }
+ 
+ 
