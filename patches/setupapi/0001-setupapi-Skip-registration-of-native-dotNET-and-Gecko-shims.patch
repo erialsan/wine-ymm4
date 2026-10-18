@@ -1,0 +1,21 @@
+diff --git a/dlls/setupapi/install.c b/dlls/setupapi/install.c
+index 0321ff6..4931fba 100644
+--- a/dlls/setupapi/install.c
++++ b/dlls/setupapi/install.c
+@@ -720,6 +720,16 @@ static BOOL register_dlls_callback( HINF hinf, PCWSTR field, void *arg )
+         /* get dll name */
+         if (!SetupGetStringFieldW( &context, 3, buffer, ARRAY_SIZE( buffer ), NULL ))
+             goto done;
++        /* Skip the native .NET / Gecko shims. Their DllRegisterServer can show
++         * interactive error UI (which then waits forever) when they are installed
++         * as native overrides (e.g. winetricks dotnet472). Re-registration from
++         * wineboot is unnecessary; the shims register themselves at install time. */
++        if (!lstrcmpiW( buffer, L"mscoree.dll" ) || !lstrcmpiW( buffer, L"mshtml.dll" ))
++        {
++            WARN( "skipping registration of native shim %s\n", debugstr_w( buffer ) );
++            free( path );
++            continue;
++        }
+         if (!(p = realloc( path, (lstrlenW(path) + lstrlenW(buffer) + 2) * sizeof(WCHAR) )))
+             goto done;
+         path = p;
