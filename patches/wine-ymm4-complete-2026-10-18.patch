@@ -126,7 +126,7 @@ index ba6cea78..f1da4160 100644
      struct d2d_effect_context *effect_context;
      struct d2d_transform_graph *graph;
 diff --git a/dlls/d2d1/device.c b/dlls/d2d1/device.c
-index 552d6d4c..60a936a3 100644
+index 552d6d4c..e2206aec 100644
 --- a/dlls/d2d1/device.c
 +++ b/dlls/d2d1/device.c
 @@ -18,6 +18,7 @@
@@ -263,8 +263,8 @@ index 552d6d4c..60a936a3 100644
 +            *tag2 = context->error.tag2;
 +
 +        return context->error.code;
-+    }
-+
+     }
+ 
 +    if (0) fprintf(stderr, "YMM4DIAG: EndDraw code=%#lx\n", (unsigned long)context->error.code); fflush(stderr);
 +
 +#if 0
@@ -336,8 +336,8 @@ index 552d6d4c..60a936a3 100644
 +                ID2D1Bitmap_Release(dbg_bm);
 +            }
 +        }
-     }
- 
++    }
++
 +#endif
      if (tag1)
          *tag1 = context->error.tag1;
@@ -523,7 +523,7 @@ index 552d6d4c..60a936a3 100644
      if (!target)
      {
          d2d_device_context_reset_target(context);
-@@ -2713,16 +2957,351 @@ static void STDMETHODCALLTYPE d2d_device_context_ID2D1DeviceContext_DrawGlyphRun
+@@ -2713,16 +2957,354 @@ static void STDMETHODCALLTYPE d2d_device_context_ID2D1DeviceContext_DrawGlyphRun
      d2d_device_context_draw_glyph_run(context, baseline_origin, glyph_run, glyph_run_desc, brush, measuring_mode);
  }
  
@@ -861,21 +861,24 @@ index 552d6d4c..60a936a3 100644
      TRACE("iface %p, image %p, target_offset %s, image_rect %s, interpolation_mode %#x, composite_mode %#x.\n",
              iface, image, debug_d2d_point_2f(target_offset), debug_d2d_rect_f(image_rect),
              interpolation_mode, composite_mode);
-+    if (0) fprintf(stderr, "YMM4DIAG: DrawImage img=%p", (void *)image);
-+    if (!image_rect) fprintf(stderr, " rect=N");
-+    else fprintf(stderr, " rect=(%.1f,%.1f,%.1f,%.1f)", image_rect->left, image_rect->top, image_rect->right, image_rect->bottom);
-+    if (!target_offset) fprintf(stderr, " off=N");
-+    else fprintf(stderr, " off=(%.1f,%.1f)", target_offset->x, target_offset->y);
++    if (0)
 +    {
-+        D2D1_MATRIX_3X2_F ct = context->drawing_state.transform;
-+        fprintf(stderr, " ctxT=(%.1f,%.1f,%.1f,%.1f,%.1f,%.1f)", ct._11, ct._12, ct._21, ct._22, ct._31, ct._32);
++        fprintf(stderr, "YMM4DIAG: DrawImage img=%p", (void *)image);
++        if (!image_rect) fprintf(stderr, " rect=N");
++        else fprintf(stderr, " rect=(%.1f,%.1f,%.1f,%.1f)", image_rect->left, image_rect->top, image_rect->right, image_rect->bottom);
++        if (!target_offset) fprintf(stderr, " off=N");
++        else fprintf(stderr, " off=(%.1f,%.1f)", target_offset->x, target_offset->y);
++        {
++            D2D1_MATRIX_3X2_F ct = context->drawing_state.transform;
++            fprintf(stderr, " ctxT=(%.1f,%.1f,%.1f,%.1f,%.1f,%.1f)", ct._11, ct._12, ct._21, ct._22, ct._31, ct._32);
++        }
++        fprintf(stderr, " err=%#lx", (unsigned long)context->error.code);
++        fprintf(stderr, "\n"); fflush(stderr);
 +    }
-+    fprintf(stderr, " err=%#lx", (unsigned long)context->error.code);
-+    fprintf(stderr, "\n"); fflush(stderr);
  
      if (FAILED(context->error.code))
          return;
-@@ -2745,12 +3324,242 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawImage(ID2D1DeviceContext6 *
+@@ -2745,12 +3327,242 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawImage(ID2D1DeviceContext6 *
  
      if (SUCCEEDED(ID2D1Image_QueryInterface(image, &IID_ID2D1Bitmap, (void **)&bitmap)))
      {
@@ -1119,7 +1122,7 @@ index 552d6d4c..60a936a3 100644
      FIXME("Unhandled image %p.\n", image);
  }
  
-@@ -2771,6 +3580,12 @@ static void STDMETHODCALLTYPE d2d_device_context_ID2D1DeviceContext_DrawBitmap(I
+@@ -2771,6 +3583,12 @@ static void STDMETHODCALLTYPE d2d_device_context_ID2D1DeviceContext_DrawBitmap(I
              "src_rect %s, perspective_transform %p.\n",
              iface, bitmap, debug_d2d_rect_f(dst_rect), opacity, interpolation_mode,
              debug_d2d_rect_f(src_rect), perspective_transform);
@@ -1133,7 +1136,7 @@ index 552d6d4c..60a936a3 100644
      if (FAILED(context->error.code))
          return;
 diff --git a/dlls/d2d1/effect.c b/dlls/d2d1/effect.c
-index fde640b3..d7f398c8 100644
+index fde640b3..6bcdfa5f 100644
 --- a/dlls/d2d1/effect.c
 +++ b/dlls/d2d1/effect.c
 @@ -17,6 +17,7 @@
@@ -2111,13 +2114,14 @@ index fde640b3..d7f398c8 100644
  
      if (prop->size != size) return E_INVALIDARG;
  
-@@ -2810,6 +3741,20 @@ static HRESULT STDMETHODCALLTYPE d2d_effect_SetValue(ID2D1Effect *iface, UINT32
+@@ -2810,6 +3741,21 @@ static HRESULT STDMETHODCALLTYPE d2d_effect_SetValue(ID2D1Effect *iface, UINT32
  
      TRACE("iface %p, index %#x, type %u, value %p, value_size %u.\n", iface, index, type, value, value_size);
  
++    if (0)
 +    {
 +        const float *f = (const float *)value;
-+        if (0) fprintf(stderr, "YMM4DIAG: SetValue idx=%u type=%u size=%u", index, type, value_size);
++        fprintf(stderr, "YMM4DIAG: SetValue idx=%u type=%u size=%u", index, type, value_size);
 +        if (value && value_size)
 +            fprintf(stderr, " f=(%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f)",
 +                    value_size >= 4 ? f[0] : 0.0f, value_size >= 8 ? f[1] : 0.0f,
@@ -2132,7 +2136,7 @@ index fde640b3..d7f398c8 100644
      return ID2D1Properties_SetValue(&effect->properties.ID2D1Properties_iface, index, type,
              value, value_size);
  }
-@@ -2914,7 +3859,8 @@ static HRESULT d2d_effect_set_input_count(struct d2d_effect *effect, UINT32 coun
+@@ -2914,7 +3860,8 @@ static HRESULT d2d_effect_set_input_count(struct d2d_effect *effect, UINT32 coun
  
          if (SUCCEEDED(hr = d2d_transform_graph_create(count, &effect->graph)))
          {
@@ -2142,7 +2146,7 @@ index fde640b3..d7f398c8 100644
                  WARN("Failed to set a new transform graph, hr %#lx.\n", hr);
          }
      }
-@@ -3539,16 +4485,31 @@ HRESULT d2d_effect_create(struct d2d_device_context *context, const CLSID *effec
+@@ -3539,16 +4486,31 @@ HRESULT d2d_effect_create(struct d2d_device_context *context, const CLSID *effec
      if (FAILED(hr = ID2D1EffectImpl_Initialize(object->impl, &effect_context->ID2D1EffectContext_iface,
              &object->graph->ID2D1TransformGraph_iface)))
      {

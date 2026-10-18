@@ -196,6 +196,11 @@ Wine 本体に由来するパッチのため **LGPL-2.1-or-later**（`LICENSE` /
   なお統合版 `patches/wine-ymm4-complete-2026-10-17.patch` は master 2026-09-23 ベースで
   wine-11.20 には適用できないため、flake では分割版 5 本 + winex11 の 11.20 版を使う。
 
+- **2026-10-18 (3)**: 実使用フィードバックによる修正 — ①ウィンドウ移動時の子サーフェス**再同期**
+  （`X11DRV_WindowPosChanged` フック + アタッチ登録簿。プレビュー位置が動かすとズレる問題の修正）、
+  ②子サーフェスの**クリック透過**（ShapeInput を空に。プレビュー上のクリックが届かない問題の修正）、
+  ③win32 枠座標 → X クライアント座標の補正（`ClientToScreen`。最大化時の枠オフセットによるズレの修正）、
+  ④d2d1 の消し忘れ診断 fprintf を除去（毎描画の stderr 出力を解消）。
 - **2026-10-18 (2)**: 未登録だった組み込みエフェクト **18 種を追加登録**
   （ChromaKey / CrossFade / DistantDiffuse / DistantSpecular / EdgeDetection / Exposure /
   GammaTransfer / HighlightsShadows / Invert / LinearTransfer / LuminanceToAlpha / Morphology /

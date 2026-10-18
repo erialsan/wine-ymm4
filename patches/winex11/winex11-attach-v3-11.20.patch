@@ -42,10 +42,10 @@ index cf032cb..f6d8881 100644
  
  static void x11drv_client_surface_update( struct client_surface *client )
 diff --git a/dlls/winex11.drv/window.c b/dlls/winex11.drv/window.c
-index d7df0a8..5af30f0 100644
+index d7df0a8..2a8aa9b 100644
 --- a/dlls/winex11.drv/window.c
 +++ b/dlls/winex11.drv/window.c
-@@ -2341,6 +2341,48 @@ void attach_client_window( struct x11drv_win_data *data, Window client_window )
+@@ -2341,6 +2341,105 @@ void attach_client_window( struct x11drv_win_data *data, Window client_window )
  }
  
  
@@ -53,16 +53,40 @@ index d7df0a8..5af30f0 100644
 + * native D3D/Vulkan presents (DXVK) become visible. Called from the client surface
 + * update paths in a context where no win_data lock is held.
 + * Gated by env var WINE_X11_CHILD_SURFACE_ATTACH. */
++/* YMM4: registry of attached child surfaces, so window moves can be re-synced */
++#define YMM4_MAX_ATTACHED 8
++static struct
++{
++    HWND hwnd;
++    Window window;
++    Window top;
++    int x, y, w, h;
++} ymm4_attached[YMM4_MAX_ATTACHED];
++static int ymm4_attached_count;
++
++static void ymm4_attach_place( int idx, Window window, Window top_window, int x, int y, int w, int h )
++{
++    WARN( "attach-child: %p window %lx -> %lx at %d,%d size %dx%d\n",
++          ymm4_attached[idx].hwnd, window, top_window, x, y, w, h );
++    XReparentWindow( gdi_display, window, top_window, x, y );
++    XMoveResizeWindow( gdi_display, window, x, y, w, h );
++    XMapRaised( gdi_display, window );
++#ifdef HAVE_LIBXSHAPE
++    {   /* YMM4: keep the attached window input-transparent so clicks reach the real HWND tree */
++        static XRectangle empty_rect;
++        XShapeCombineRectangles( gdi_display, window, ShapeInput, 0, 0, &empty_rect, 1, ShapeSet, YXBanded );
++    }
++#endif
++    XFlush( gdi_display );
++}
++
 +void x11drv_attach_child_surface( HWND hwnd, Window window )
 +{
-+    static HWND last_hwnd;
-+    static Window last_window, last_top;
-+    static int last_x, last_y, last_w, last_h;
 +    HWND toplevel = NtUserGetAncestor( hwnd, GA_ROOT );
 +    struct x11drv_win_data *data;
 +    RECT wrect, trect;
 +    Window top_window;
-+    int x, y, w, h;
++    int x, y, w, h, i, idx = -1;
 +
 +    if (!toplevel || toplevel == hwnd) return;
 +    if (NtUserGetAncestor( hwnd, GA_PARENT ) == NtUserGetDesktopWindow()) return; /* child windows only */
@@ -77,32 +101,91 @@ index d7df0a8..5af30f0 100644
 +    top_window = data->whole_window;
 +    release_win_data( data );
 +    if (!top_window) return;
-+    x = wrect.left - trect.left;
-+    y = wrect.top - trect.top;
-+    if (hwnd == last_hwnd && window == last_window && top_window == last_top &&
-+        x == last_x && y == last_y && w == last_w && h == last_h) return;
-+    last_hwnd = hwnd; last_window = window; last_top = top_window;
-+    last_x = x; last_y = y; last_w = w; last_h = h;
-+    WARN( "attach-child: %p window %lx -> %lx at %d,%d size %dx%d\n", hwnd, window, top_window, x, y, w, h );
-+    XReparentWindow( gdi_display, window, top_window, x, y );
-+    XMoveResizeWindow( gdi_display, window, x, y, w, h );
-+    XMapRaised( gdi_display, window );
-+    XFlush( gdi_display );
++    {   /* YMM4: position the attached window relative to the toplevel's CLIENT origin.
++         * The win32 window rect includes the (virtual) frame; the X top window is the
++         * client area, so window-rect deltas are off by the frame offsets. */
++        POINT pt = { 0, 0 };
++        if (!NtUserClientToScreen( toplevel, &pt )) return;
++        x = wrect.left - pt.x;
++        y = wrect.top - pt.y;
++    }
++    WARN( "attach-check: hwnd %p wrect=(%d,%d)-(%d,%d) trect=(%d,%d)-(%d,%d) calc=(%d,%d) %dx%d\n",
++          hwnd, wrect.left, wrect.top, wrect.right, wrect.bottom,
++          trect.left, trect.top, trect.right, trect.bottom, x, y, w, h );
++    for (i = 0; i < ymm4_attached_count; i++)
++        if (ymm4_attached[i].hwnd == hwnd && ymm4_attached[i].window == window) { idx = i; break; }
++    if (idx == -1)
++    {
++        if (ymm4_attached_count >= YMM4_MAX_ATTACHED) return;
++        idx = ymm4_attached_count++;
++        ymm4_attached[idx].top = 0; /* force placement on first sight */
++    }
++    if (ymm4_attached[idx].top == top_window && ymm4_attached[idx].x == x &&
++        ymm4_attached[idx].y == y && ymm4_attached[idx].w == w && ymm4_attached[idx].h == h)
++        return;
++    ymm4_attached[idx].hwnd = hwnd;
++    ymm4_attached[idx].window = window;
++    ymm4_attached[idx].top = top_window;
++    ymm4_attached[idx].x = x; ymm4_attached[idx].y = y;
++    ymm4_attached[idx].w = w; ymm4_attached[idx].h = h;
++    ymm4_attach_place( idx, window, top_window, x, y, w, h );
++}
++
++/* YMM4: re-sync attached child surfaces after a window move.
++ * Must be called with no win_data lock held (win_data locks are not recursive). */
++void x11drv_resync_attached_child( HWND moved )
++{
++    int i;
++    (void)moved;
++    if (!getenv( "WINE_X11_CHILD_SURFACE_ATTACH" )) return;
++    WARN( "resync-run: moved %p entries=%d\n", moved, ymm4_attached_count );
++    /* Re-check every attached surface: the app often moves an ancestor of the
++     * preview HWND, so matching on hwnd/root alone misses real moves. The
++     * attach call is cheap (two window rects + a cache compare). */
++    for (i = 0; i < ymm4_attached_count; i++)
++        if (ymm4_attached[i].hwnd)
++            x11drv_attach_child_surface( ymm4_attached[i].hwnd, ymm4_attached[i].window );
 +}
 +
 +
  /**********************************************************************
   *      destroy_client_window
   */
+@@ -2354,6 +2453,14 @@ void destroy_client_window( HWND hwnd, Window client_window )
+     {
+         if (data->client_window == client_window)
+         {
++            int i;
++            /* YMM4: drop attached-surface registry entry for the destroyed window */
++            for (i = 0; i < ymm4_attached_count; i++)
++                if (ymm4_attached[i].hwnd == hwnd && ymm4_attached[i].window == client_window)
++                {
++                    ymm4_attached[i] = ymm4_attached[--ymm4_attached_count];
++                    break;
++                }
+             if (data->whole_window) client_window_events_disable( data, client_window );
+             data->client_window = 0;
+         }
+@@ -3341,6 +3448,9 @@ void X11DRV_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint, UIN
+     XFlush( data->display );  /* make sure changes are done before we start painting again */
+     release_win_data( data );
+ 
++    /* YMM4: keep attached child surfaces in sync when windows move (no lock held here) */
++    x11drv_resync_attached_child( hwnd );
++
+     if (was_fullscreen) NtUserClipCursor( NULL );
+ }
+ 
 diff --git a/dlls/winex11.drv/x11drv.h b/dlls/winex11.drv/x11drv.h
-index 22462df..a071f69 100644
+index 22462df..e70f498 100644
 --- a/dlls/winex11.drv/x11drv.h
 +++ b/dlls/winex11.drv/x11drv.h
-@@ -745,6 +745,7 @@ extern void make_window_embedded( struct x11drv_win_data *data );
+@@ -745,6 +745,8 @@ extern void make_window_embedded( struct x11drv_win_data *data );
  extern Window create_client_window( HWND hwnd, RECT client_rect, const XVisualInfo *visual, Colormap colormap );
  extern void detach_client_window( struct x11drv_win_data *data, Window client_window );
  extern void attach_client_window( struct x11drv_win_data *data, Window client_window );
 +extern void x11drv_attach_child_surface( HWND hwnd, Window window ); /* YMM4 */
++extern void x11drv_resync_attached_child( HWND moved ); /* YMM4 */
  extern void destroy_client_window( HWND hwnd, Window client_window );
  extern void set_window_visual( struct x11drv_win_data *data, const XVisualInfo *vis, BOOL use_alpha );
  extern void change_systray_owner( Display *display, Window systray_window );
