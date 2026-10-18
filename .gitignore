@@ -1,0 +1,6 @@
+# nix develop が展開する wine-11.20 の作業ツリー
+/.wine-src/
+
+# nix build の出力
+/result
+/result-*
