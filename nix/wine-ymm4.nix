@@ -8,8 +8,6 @@
   lib,
   callPackage,
   wineWow64Packages,
-  # アプリ固有の互換ハック (patches/d2d1/0005) を入れるか。
-  withCompat ? true,
   # winex11.drv の子サーフェイス attach (patches/winex11) を入れるか。
   withAttach ? true,
 }:
@@ -20,7 +18,6 @@ let
   ymm4Patches =
     sources.patches.d2d1
     ++ [ sources.patches.setupapi ]
-    ++ lib.optional withCompat sources.patches.compat
     ++ lib.optional withAttach sources.patches.winex11;
 in
 wineWow64Packages.full.overrideAttrs (old: {
@@ -55,7 +52,6 @@ wineWow64Packages.full.overrideAttrs (old: {
 
   passthru = (old.passthru or { }) // {
     inherit ymm4Patches sources;
-    withCompat = withCompat;
     withAttach = withAttach;
   };
 })

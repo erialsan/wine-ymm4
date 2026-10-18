@@ -5,8 +5,9 @@
 # ベースの Wine を上げるときは wine.rev と hash を更新したうえで、
 # patches/ 以下がまだ当たるか必ず確認すること。
 #
-# なお patches/wine-ymm4-complete-2026-10-17.patch (統合版) は master
-# 2026-09-23 をベースにしており wine-11.20 には適用できない。ここでは使わない。
+# d2d1 は wine-11.20 用に生成した統合パッチ 1 本を使う (CL修正・エフェクト登録・
+# アプリ互換ハックをすべて含む)。master 2026-09-23 ベースの
+# patches/wine-ymm4-complete-*.patch は wine-11.20 には適用できない。
 { lib, fetchFromGitHub }:
 
 let
@@ -18,10 +19,7 @@ let
   };
 
   d2d1 = [
-    ../patches/d2d1/0001-d2d1-Support-EndDraw-on-a-command-list-target.patch
-    ../patches/d2d1/0002-d2d1-Implement-DrawImage-for-command-lists-and-effec.patch
-    ../patches/d2d1/0003-d2d1-Don-t-record-Clear-into-command-lists.patch
-    ../patches/d2d1/0004-d2d1-Implement-bounds-queries-for-effects-and-comman.patch
+    ../patches/d2d1/wine-11.20-d2d1-ymm4-complete.patch
   ];
 in
 {
@@ -29,10 +27,6 @@ in
 
   patches = {
     inherit d2d1;
-
-    # アプリ固有の互換ハック (中心座標系補正、Open 状態のコマンドリスト再生など)。
-    # Windows の挙動とは異なるので、切り離せるようにしてある。
-    compat = ../patches/d2d1/0005-d2d1-Application-compatibility-tweaks-YukkuriMovieMa.patch;
 
     # wow64 更新時に wineboot が rundll32 ダイアログで止まる問題の修正。
     # dotnet472 入りの古いプレフィックスを wine 11 で初回更新するときに踏む。

@@ -14,7 +14,6 @@ stdenv.mkDerivation {
 
   patches = sources.patches.d2d1 ++ [
     sources.patches.setupapi
-    sources.patches.compat
     sources.patches.winex11
   ];
 
