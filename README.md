@@ -2,6 +2,8 @@
 
 **YukkuriMovieMaker4 (YMM4) を Linux / Wine で完全に動かすための Wine パッチ集。**
 
+**最新リリース: [v3 — wine 11.20 対応 + 検証済みバイナリ同梱](https://github.com/maebahesioru/wine-ymm4/releases/tag/v3)**
+
 Wine の `d2d1.dll` に不足していた Direct2D のコマンドリスト／エフェクト画像対応を追加し、
 さらに YMM4 固有の描画互換処理（およびプレビュー子窓の表示修正）を加えるパッチ群です。
 
