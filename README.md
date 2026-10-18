@@ -143,7 +143,7 @@ SBC で動かす場合の想定ルート:
 
 - x86_64 アプリ (YMM4 は x64 の .NET) を動かすには **Box64 / FEX-Emu** などのユーザー空間エミュレーション
   + wine (x86_64 ビルド) + **DXVK (Vulkan 必須)** の組み合わせ
-- プレビュー子窓の表示には winex11 の attach パッチ（`WINE_X11_SURFACE_ATTACH`）が同様に必要です
+- プレビュー子窓の表示には winex11 の attach パッチ（`WINE_X11_CHILD_SURFACE_ATTACH`）が同様に必要です
 - **実機（Raspberry Pi 等）での動作検証はまだ行えていません**。試した報告・失敗ログは歓迎します
 
 ## YMM4 動作に必要なその他のポイント（要点）
