@@ -138,13 +138,15 @@ NixOS の `configuration.nix` からは overlay 経由でそのまま使えま�
 ### CI とバイナリキャッシュ
 
 `.github/workflows/nix.yml` が `main` への push と手動実行で `nix build .#wine` を回し、
-成果物を Cachix に投入します。キャッシュを有効にすると、以降の `nix build` は
-ビルドではなくダウンロードになります（16 コアでも 40 分ほどかかります）。
+成果物を Cachix（キャッシュ名 `ymm4-wine`）に投入します。キャッシュを有効にすると、
+以降の `nix build` はビルドではなくダウンロードになります（16 コアでも 40 分ほどかかります）。
 
 ```bash
-cachix create wine-ymm4     # キャッシュ名はワークフローの env.NIX_CACHE と揃える
-cachix use wine-ymm4        # ローカルの substituter に追加
+cachix use ymm4-wine        # ローカルの substituter に追加
 ```
+
+`flake.nix` の `nixConfig` にも substituter と公開鍵を書いてあるので、
+`accept-flake-config = true` にしている環境なら `cachix use` なしでも取りに行きます。
 
 GitHub の Settings → Secrets and variables → Actions に `CACHIX_AUTH_TOKEN` を登録してください。
 未設定でもワークフローは動き、キャッシュへの push だけがスキップされます。
