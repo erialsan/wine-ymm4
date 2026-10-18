@@ -27,8 +27,8 @@ stdenv.mkDerivation {
   postPatch = ''
     grep -q d2d_command_sink_create dlls/d2d1/device.c
     grep -q d2d_command_list_clear dlls/d2d1/command_list.c
-    grep -q 'Application compat' dlls/d2d1/command_list.c
-    grep -q 'Application compat' dlls/d2d1/device.c
+    grep -q target_offset dlls/d2d1/device.c
+    grep -q chroma_key_clsid dlls/d2d1/effect.c
     grep -q 'skipping registration of native shim' dlls/setupapi/install.c
     grep -q x11drv_attach_child_surface dlls/winex11.drv/x11drv.h
 
