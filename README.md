@@ -71,13 +71,21 @@ cd wine
 #   winex11.so -> <wine>/lib/wine/x86_64-unix/
 ```
 
-起動時に `WINE_X11_CHILD_SURFACE_ATTACH=1` を設定してください。
+起動時は `WINE_X11_CHILD_SURFACE_ATTACH=1` が必要です。同梱の `scripts/run-ymm4.sh` を使うと、
+環境変数一式（DOTNET 系・winewayland 無効化・ntsync チェック）を設定して起動できます:
+
+```bash
+scripts/run-ymm4.sh <YMM4ディレクトリ> <Wineプレフィックス> <プロジェクト.ymmp> [wineバイナリ]
+# 例: scripts/run-ymm4.sh ~/ymm4-423-test ~/.wine-ymm-test ~/ymm4-423-test/test.ymmp /opt/wine11up/bin/wine
+```
 
 ## YMM4 動作に必要なその他のポイント（要点）
 
 - Wine プレフィックスに **DXVK 3.1.1（最新・推奨。wine 11.20 でプレビュー/書き出し実測動作）** または 2.5.3（d3d9/d3d11/dxgi）+ `dxgi.syncInterval=0`
 - 日本語フォント（Noto CJK）とフォント代替設定、`DOTNET_SYSTEM_GLOBALIZATION_USENLS=1`
-- 起動前に `sudo chmod 000 /dev/ntsync`（ntsync デッドロック回避・再起動毎に必要）
+- ntsync デッドロック回避（wine が `/dev/ntsync` を使うと固まる環境）: デバイスを `chmod 000` で封鎖する。
+  再起動・デバイス再作成のたびの手動 chmod を不要にするには、udev ルールで自動化するのがおすすめ:
+  `echo 'SUBSYSTEM=="misc", KERNEL=="ntsync", RUN+="/usr/bin/chmod 000 /dev/ntsync"' | sudo tee /etc/udev/rules.d/99-ntsync-block.rules && sudo udevadm control --reload-rules`
 - `WINEDLLOVERRIDES="winewayland.drv=d"` で X11 強制
 - 補足: 古いプレフィックス（wine 10 製）を wine 11 で初回起動する際、wineboot の
   「Wow64Install」工程で rundll32 ダイアログ（"This application could not be started."）が
@@ -94,6 +102,8 @@ Wine 本体に由来するパッチのため **LGPL-2.1-or-later**（`LICENSE` /
 - **2026-10-18**: wow64 更新時の wineboot 停止問題を修正 — `patches/setupapi/0001`
   （ネイティブ mscoree / mshtml の再登録スキップ）。dotnet472 入りの古いプレフィックスを
   wine 11 で初回更新する時の「rundll32 ダイアログで停止」が解消（実測確認済み）。
+  併せて起動まわりを整理: `scripts/run-ymm4.sh`（環境変数一式の起動ラッパー）を追加、
+  ntsync 自動封鎖の udev ルール手順を README に追記。
 
 - **2026-10-17 v3**: 上流 wine **11.20** (最新タグ) のフルビルドに対応
   — winex11アタッチパッチの 11.20 版 = `patches/winex11/winex11-attach-v3-11.20.patch`。
