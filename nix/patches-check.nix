@@ -13,6 +13,7 @@ stdenv.mkDerivation {
   src = sources.wine;
 
   patches = sources.patches.d2d1 ++ [
+    sources.patches.setupapi
     sources.patches.compat
     sources.patches.winex11
   ];
@@ -29,6 +30,7 @@ stdenv.mkDerivation {
     grep -q d2d_command_list_clear dlls/d2d1/command_list.c
     grep -q 'Application compat' dlls/d2d1/command_list.c
     grep -q 'Application compat' dlls/d2d1/device.c
+    grep -q 'skipping registration of native shim' dlls/setupapi/install.c
     grep -q x11drv_attach_child_surface dlls/winex11.drv/x11drv.h
 
     # 統合版にあった無条件 fprintf が混ざっていないこと。
