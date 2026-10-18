@@ -2,6 +2,8 @@
 
 **YukkuriMovieMaker4 (YMM4) を Linux / Wine で完全に動かすための Wine パッチ集。**
 
+**最新リリース: [v3 — wine 11.20 対応 + 検証済みバイナリ同梱](https://github.com/maebahesioru/wine-ymm4/releases/tag/v3)**
+
 Wine の `d2d1.dll` に不足していた Direct2D のコマンドリスト／エフェクト画像対応を追加し、
 さらに YMM4 固有の描画互換処理（およびプレビュー子窓の表示修正）を加えるパッチ群です。
 
@@ -41,6 +43,14 @@ Wine の `d2d1.dll` に不足していた Direct2D のコマンドリスト／�
 
 いずれも環境変数 `WINE_X11_CHILD_SURFACE_ATTACH=1` で有効化します。
 
+### `patches/setupapi/` — Wine 本体（dlls/setupapi/）に適用
+
+- `0001` **Skip registration of native .NET / Gecko shims** — wineboot の INF 処理（`RegisterDlls`）が
+  `mscoree.dll`（ネイティブ .NET）/ `mshtml.dll`（Gecko）を再登録しようとすると、これらの
+  `DllRegisterServer` が対話エラーダイアログ（"This application could not be started."）を出して
+  永久に待機し、wineboot が Wow64Install 工程で停止する問題を回避する。
+  （dotnet472 等でネイティブ上書きされた古いプレフィックスを wine 11 で初回更新する時に発生。2026-10-18 修正）
+
 ## ビルド方法（wine 11.20・2026-10-17 実測手順）
 
 ```bash
@@ -63,7 +73,13 @@ cd wine
 #   winex11.so -> <wine>/lib/wine/x86_64-unix/
 ```
 
-起動時に `WINE_X11_CHILD_SURFACE_ATTACH=1` を設定してください。
+起動時は `WINE_X11_CHILD_SURFACE_ATTACH=1` が必要です。同梱の `scripts/run-ymm4.sh` を使うと、
+環境変数一式（DOTNET 系・winewayland 無効化・ntsync チェック）を設定して起動できます:
+
+```bash
+scripts/run-ymm4.sh <YMM4ディレクトリ> <Wineプレフィックス> <プロジェクト.ymmp> [wineバイナリ]
+# 例: scripts/run-ymm4.sh ~/ymm4-423-test ~/.wine-ymm-test ~/ymm4-423-test/test.ymmp /opt/wine11up/bin/wine
+```
 
 ## Nix でビルドする
 
@@ -104,7 +120,7 @@ NixOS の `configuration.nix` からは overlay 経由でそのまま使えま�
 
 ```nix
 {
-  inputs.wine-ymm4.url = "github:erialsan/wine-ymm4";
+  inputs.wine-ymm4.url = "github:maebahesioru/wine-ymm4";
 
   imports = [ inputs.wine-ymm4.overlays.default ];
   environment.systemPackages = [ pkgs.wine-ymm4 ];
@@ -118,11 +134,15 @@ NixOS の `configuration.nix` からは overlay 経由でそのまま使えま�
 
 - Wine プレフィックスに **DXVK 3.1.1（最新・推奨。wine 11.20 でプレビュー/書き出し実測動作）** または 2.5.3（d3d9/d3d11/dxgi）+ `dxgi.syncInterval=0`
 - 日本語フォント（Noto CJK）とフォント代替設定、`DOTNET_SYSTEM_GLOBALIZATION_USENLS=1`
-- 起動前に `sudo chmod 000 /dev/ntsync`（ntsync デッドロック回避・再起動毎に必要）
+- ntsync デッドロック回避（wine が `/dev/ntsync` を使うと固まる環境）: デバイスを `chmod 000` で封鎖する。
+  再起動・デバイス再作成のたびの手動 chmod を不要にするには、udev ルールで自動化するのがおすすめ:
+  `echo 'SUBSYSTEM=="misc", KERNEL=="ntsync", RUN+="/usr/bin/chmod 000 /dev/ntsync"' | sudo tee /etc/udev/rules.d/99-ntsync-block.rules && sudo udevadm control --reload-rules`
 - `WINEDLLOVERRIDES="winewayland.drv=d"` で X11 強制
-- 補足: 古いプレフィックス（wine 10 製）を wine 11 で初回起動すると、wineboot の
-  「Wow64Install」処理が rundll32 ダイアログで待機することがあります。
-  64bit アプリの動作には実害がないため、閉じて続行して問題ありません。
+- 補足: 古いプレフィックス（wine 10 製）を wine 11 で初回起動する際、wineboot の
+  「Wow64Install」工程で rundll32 ダイアログ（"This application could not be started."）が
+  出て停止することがあります。**本リポジトリの `patches/setupapi/` を適用したビルドでは
+  発生しません**（2026-10-18 修正・実測確認済み）。未適用ビルドでは、ダイアログを閉じて
+  続行して問題ありません（64bit アプリには実害なし）。
 
 ## ライセンス
 
@@ -130,7 +150,13 @@ Wine 本体に由来するパッチのため **LGPL-2.1-or-later**（`LICENSE` /
 
 ## 更新履歴
 
-- **2026-10-18**: Nix flake を追加 — `nix build .#wine` でパッチ適用済み Wine、
+- **2026-10-18**: wow64 更新時の wineboot 停止問題を修正 — `patches/setupapi/0001`
+  （ネイティブ mscoree / mshtml の再登録スキップ）。dotnet472 入りの古いプレフィックスを
+  wine 11 で初回更新する時の「rundll32 ダイアログで停止」が解消（実測確認済み）。
+  併せて起動まわりを整理: `scripts/run-ymm4.sh`（環境変数一式の起動ラッパー）を追加、
+  ntsync 自動封鎖の udev ルール手順を README に追記。
+
+- **2026-10-18 (Nix)**: Nix flake を追加 — `nix build .#wine` でパッチ適用済み Wine、
   `nix develop` で `d2d1.dll` / `winex11.so` だけを作る開発環境。
   対象 Wine を wine-11.20 に固定したので、パッチ適用可否は `nix flake check` で検証できる。
   なお統合版 `patches/wine-ymm4-complete-2026-10-17.patch` は master 2026-09-23 ベースで
