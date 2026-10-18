@@ -42,10 +42,10 @@ index cf032cb..f6d8881 100644
  
  static void x11drv_client_surface_update( struct client_surface *client )
 diff --git a/dlls/winex11.drv/window.c b/dlls/winex11.drv/window.c
-index d7df0a8..2a8aa9b 100644
+index d7df0a8..df108d6 100644
 --- a/dlls/winex11.drv/window.c
 +++ b/dlls/winex11.drv/window.c
-@@ -2341,6 +2341,105 @@ void attach_client_window( struct x11drv_win_data *data, Window client_window )
+@@ -2341,6 +2341,115 @@ void attach_client_window( struct x11drv_win_data *data, Window client_window )
  }
  
  
@@ -61,22 +61,31 @@ index d7df0a8..2a8aa9b 100644
 +    Window window;
 +    Window top;
 +    int x, y, w, h;
++    BOOL reparented;
 +} ymm4_attached[YMM4_MAX_ATTACHED];
 +static int ymm4_attached_count;
 +
 +static void ymm4_attach_place( int idx, Window window, Window top_window, int x, int y, int w, int h )
 +{
-+    WARN( "attach-child: %p window %lx -> %lx at %d,%d size %dx%d\n",
-+          ymm4_attached[idx].hwnd, window, top_window, x, y, w, h );
-+    XReparentWindow( gdi_display, window, top_window, x, y );
++    WARN( "attach-child: %p window %lx -> %lx at %d,%d size %dx%d%s\n",
++          ymm4_attached[idx].hwnd, window, top_window, x, y, w, h,
++          ymm4_attached[idx].reparented && ymm4_attached[idx].top == top_window ? "" : " (reparent)" );
++    /* XReparentWindow unmaps/remaps the window and invalidates the DXVK swapchain's
++     * association with it, so do it only on the first placement (or when the
++     * toplevel changes). Subsequent moves are plain XMoveResizeWindow. */
++    if (!ymm4_attached[idx].reparented || ymm4_attached[idx].top != top_window)
++    {
++        XReparentWindow( gdi_display, window, top_window, x, y );
++#ifdef HAVE_LIBXSHAPE
++        {   /* YMM4: keep the attached window input-transparent so clicks reach the real HWND tree */
++            static XRectangle empty_rect;
++            XShapeCombineRectangles( gdi_display, window, ShapeInput, 0, 0, &empty_rect, 1, ShapeSet, YXBanded );
++        }
++#endif
++        ymm4_attached[idx].reparented = TRUE;
++    }
 +    XMoveResizeWindow( gdi_display, window, x, y, w, h );
 +    XMapRaised( gdi_display, window );
-+#ifdef HAVE_LIBXSHAPE
-+    {   /* YMM4: keep the attached window input-transparent so clicks reach the real HWND tree */
-+        static XRectangle empty_rect;
-+        XShapeCombineRectangles( gdi_display, window, ShapeInput, 0, 0, &empty_rect, 1, ShapeSet, YXBanded );
-+    }
-+#endif
 +    XFlush( gdi_display );
 +}
 +
@@ -118,7 +127,8 @@ index d7df0a8..2a8aa9b 100644
 +    {
 +        if (ymm4_attached_count >= YMM4_MAX_ATTACHED) return;
 +        idx = ymm4_attached_count++;
-+        ymm4_attached[idx].top = 0; /* force placement on first sight */
++        ymm4_attached[idx].top = 0;      /* force placement on first sight */
++        ymm4_attached[idx].reparented = FALSE;
 +    }
 +    if (ymm4_attached[idx].top == top_window && ymm4_attached[idx].x == x &&
 +        ymm4_attached[idx].y == y && ymm4_attached[idx].w == w && ymm4_attached[idx].h == h)
@@ -151,7 +161,7 @@ index d7df0a8..2a8aa9b 100644
  /**********************************************************************
   *      destroy_client_window
   */
-@@ -2354,6 +2453,14 @@ void destroy_client_window( HWND hwnd, Window client_window )
+@@ -2354,6 +2463,14 @@ void destroy_client_window( HWND hwnd, Window client_window )
      {
          if (data->client_window == client_window)
          {
@@ -166,7 +176,7 @@ index d7df0a8..2a8aa9b 100644
              if (data->whole_window) client_window_events_disable( data, client_window );
              data->client_window = 0;
          }
-@@ -3341,6 +3448,9 @@ void X11DRV_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint, UIN
+@@ -3341,6 +3458,9 @@ void X11DRV_WindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint, UIN
      XFlush( data->display );  /* make sure changes are done before we start painting again */
      release_win_data( data );
  
