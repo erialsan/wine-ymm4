@@ -34,6 +34,11 @@ Wine の `d2d1.dll` に不足していた Direct2D のコマンドリスト／�
    - Open 状態のリストのリプレイ許容
    - 中心座標系キャンバスの補正（明示オフセット付きビットマップ描画をターゲット中心基準で配置）
 
+**wine 11.20 用の統合パッチ**: `patches/d2d1/wine-11.20-d2d1-ymm4-complete.patch`
+— 上記すべて（CL修正・エフェクト画像描画・組み込みエフェクト登録・カスタムエフェクトfallback）を
+含む 5 ファイル一括パッチ。**wine-11.20 のツリーにそのまま `git apply` できます**（Nix flake はこちらを使用）。
+エフェクト登録の実機検証は `scripts/fxprobe.cpp`（mingw でビルドし wine 上で実行、18種の CreateEffect/SetValue/描画を確認）。
+
 ### `patches/winex11/` — Wine 本体（dlls/winex11.drv/）に適用
 
 - `winex11-attach-v3-11.20.patch` — **wine 11.20 向け（推奨）**。`init.c` / `window.c` / `x11drv.h` の 3 ファイル。
@@ -134,7 +139,7 @@ NixOS の `configuration.nix` からは overlay 経由でそのまま使えま�
 
 `.github/workflows/nix.yml` が `main` への push と手動実行で `nix build .#wine` を回し、
 成果物を Cachix に投入します。キャッシュを有効にすると、以降の `nix build` は
-ビルドではなくダウンロードになります（16 コアでも 40 分ほどかかるため）。
+ビルドではなくダウンロードになります（16 コアでも 40 分ほどかかります）。
 
 ```bash
 cachix create wine-ymm4     # キャッシュ名はワークフローの env.NIX_CACHE と揃える
@@ -143,6 +148,17 @@ cachix use wine-ymm4        # ローカルの substituter に追加
 
 GitHub の Settings → Secrets and variables → Actions に `CACHIX_AUTH_TOKEN` を登録してください。
 未設定でもワークフローは動き、キャッシュへの push だけがスキップされます。
+
+## SBC / ARM について
+
+パッチ本体はアーキ非依存の C コードなので、ARM (aarch64) の Wine ツリーにもそのまま適用できます
+（`scripts/build-d2d1.sh` は PE ターゲットのアーキディレクトリを自動検出します）。
+SBC で動かす場合の想定ルート:
+
+- x86_64 アプリ (YMM4 は x64 の .NET) を動かすには **Box64 / FEX-Emu** などのユーザー空間エミュレーション
+  + wine (x86_64 ビルド) + **DXVK (Vulkan 必須)** の組み合わせ
+- プレビュー子窓の表示には winex11 の attach パッチ（`WINE_X11_CHILD_SURFACE_ATTACH`）が同様に必要です
+- **実機（Raspberry Pi 等）での動作検証はまだ行えていません**。試した報告・失敗ログは歓迎します
 
 ## YMM4 動作に必要なその他のポイント（要点）
 
@@ -173,10 +189,19 @@ Wine 本体に由来するパッチのため **LGPL-2.1-or-later**（`LICENSE` /
 - **2026-10-18 (Nix)**: Nix flake を追加 — `nix build .#wine` でパッチ適用済み Wine、
   `nix develop` で `d2d1.dll` / `winex11.so` だけを作る開発環境。
   対象 Wine を wine-11.20 に固定したので、パッチ適用可否は `nix flake check` で検証できる。
-  パッチは d2d1 の 5 本 + winex11 の 11.20 版 + setupapi の wineboot 修正。
-  GitHub Actions + Cachix でビルド結果をキャッシュする `workflow` も追加。
+  パッチは d2d1 統合パッチ（wine-11.20 用）+ winex11 の 11.20 版 + setupapi の wineboot 修正。
+  GitHub Actions + Cachix でビルド結果をキャッシュする workflow も追加。
   なお統合版 `patches/wine-ymm4-complete-2026-10-17.patch` は master 2026-09-23 ベースで
   wine-11.20 には適用できないため、flake では分割版 5 本 + winex11 の 11.20 版を使う。
+
+- **2026-10-18 (2)**: 未登録だった組み込みエフェクト **18 種を追加登録**
+  （ChromaKey / CrossFade / DistantDiffuse / DistantSpecular / EdgeDetection / Exposure /
+  GammaTransfer / HighlightsShadows / Invert / LinearTransfer / LuminanceToAlpha / Morphology /
+  PointDiffuse / Posterize / Sepia / Sharpen / Tile / Tint）。
+  `scripts/fxprobe.cpp` で 18/18 の CreateEffect + SetValue + DrawImage を実測確認。
+  併せて **wine 11.20 用の d2d1 統合パッチ**（`patches/d2d1/wine-11.20-d2d1-ymm4-complete.patch`）を追加。
+  描画は従来同様の入力再帰（近似）方式のため、これらのエフェクトの**見た目**は今後 wine 側の
+  エフェクト実行パス実装で改善されます（クラッシュ・作成失敗は解消）。
 
 - **2026-10-17 v3**: 上流 wine **11.20** (最新タグ) のフルビルドに対応
   — winex11アタッチパッチの 11.20 版 = `patches/winex11/winex11-attach-v3-11.20.patch`。

@@ -22,10 +22,15 @@ for p in "$HERE"/patches/d2d1/*.patch; do
     fi
 done
 
-rm -f dlls/d2d1/x86_64-windows/{device,bitmap,command_list,effect}.o dlls/d2d1/x86_64-windows/d2d1.dll
-make -j"$(nproc)" dlls/d2d1/x86_64-windows/d2d1.dll
+# PE ターゲットのアーキディレクトリを自動検出 (x86_64-windows / aarch64-windows など)
+PE_ARCH="$(cd dlls/d2d1 && ls -d *-windows 2>/dev/null | head -1)"
+[ -n "$PE_ARCH" ] || { echo "PE ターゲット (dlls/d2d1/*-windows) が見つかりません。configure を確認してください" >&2; exit 1; }
+echo "target: $PE_ARCH"
 
-DLL="$SRC/dlls/d2d1/x86_64-windows/d2d1.dll"
+rm -f dlls/d2d1/$PE_ARCH/{device,bitmap,command_list,effect}.o dlls/d2d1/$PE_ARCH/d2d1.dll
+make -j"$(nproc)" dlls/d2d1/$PE_ARCH/d2d1.dll
+
+DLL="$SRC/dlls/d2d1/$PE_ARCH/d2d1.dll"
 echo "built: $DLL"
 for d in "$@"; do
     echo "deploying: $d"
