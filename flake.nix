@@ -3,6 +3,16 @@
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
+  # ビルド済み成果物のキャッシュ (Cachix)。温まっていればビルドではなくダウンロードになる。
+  # flake の nixConfig は accept-flake-config が無いと確認を求められるので、
+  # 手元では併せて `cachix use ymm4-wine` を実行しておくとよい。
+  nixConfig = {
+    extra-substituters = [ "https://ymm4-wine.cachix.org" ];
+    extra-trusted-public-keys = [
+      "ymm4-wine.cachix.org-1:8z00/GI/7aQ8FYH72uQhxr0XaogjYZoX8e+DWeWiMPc="
+    ];
+  };
+
   outputs =
     { self, nixpkgs }:
     let

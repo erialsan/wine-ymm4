@@ -11,9 +11,9 @@ concurrency:
 
 env:
   # Cachix のキャッシュ名。自分のキャッシュ名に合わせて変更する。
-  #   cachix create wine-ymm4
+  #   cachix create ymm4-wine
   #   リポジトリの secret に CACHIX_AUTH_TOKEN を登録
-  NIX_CACHE: wine-ymm4
+  NIX_CACHE: ymm4-wine
 
 jobs:
   wine:
@@ -30,6 +30,7 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
+            accept-flake-config = true
 
       - uses: cachix/cachix-action@v17
         if: env.CACHIX_AUTH_TOKEN != ''
