@@ -19,6 +19,7 @@ let
 
   ymm4Patches =
     sources.patches.d2d1
+    ++ [ sources.patches.setupapi ]
     ++ lib.optional withCompat sources.patches.compat
     ++ lib.optional withAttach sources.patches.winex11;
 in
@@ -42,6 +43,7 @@ wineWow64Packages.full.overrideAttrs (old: {
   postPatch = ''
     grep -q d2d_command_sink_create dlls/d2d1/device.c
     grep -q d2d_command_list_clear dlls/d2d1/command_list.c
+    grep -q 'skipping registration of native shim' dlls/setupapi/install.c
   ''
   + lib.optionalString withCompat ''
     grep -q 'Application compat' dlls/d2d1/command_list.c

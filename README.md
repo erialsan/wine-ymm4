@@ -135,6 +135,20 @@ NixOS の `configuration.nix` からは overlay 経由でそのまま使えま�
 `nix develop` を使わない場合、従来どおり手元の wine 11.20 チェックアウトを
 `scripts/*.sh` の引数に渡せば同じようにビルドできます。
 
+### CI とバイナリキャッシュ
+
+`.github/workflows/nix.yml` が `main` への push と手動実行で `nix build .#wine` を回し、
+成果物を Cachix に投入します。キャッシュを有効にすると、以降の `nix build` は
+ビルドではなくダウンロードになります（16 コアでも 40 分ほどかかります）。
+
+```bash
+cachix create wine-ymm4     # キャッシュ名はワークフローの env.NIX_CACHE と揃える
+cachix use wine-ymm4        # ローカルの substituter に追加
+```
+
+GitHub の Settings → Secrets and variables → Actions に `CACHIX_AUTH_TOKEN` を登録してください。
+未設定でもワークフローは動き、キャッシュへの push だけがスキップされます。
+
 ## SBC / ARM について
 
 パッチ本体はアーキ非依存の C コードなので、ARM (aarch64) の Wine ツリーにもそのまま適用できます
@@ -175,6 +189,8 @@ Wine 本体に由来するパッチのため **LGPL-2.1-or-later**（`LICENSE` /
 - **2026-10-18 (Nix)**: Nix flake を追加 — `nix build .#wine` でパッチ適用済み Wine、
   `nix develop` で `d2d1.dll` / `winex11.so` だけを作る開発環境。
   対象 Wine を wine-11.20 に固定したので、パッチ適用可否は `nix flake check` で検証できる。
+  パッチは d2d1 統合パッチ（wine-11.20 用）+ winex11 の 11.20 版 + setupapi の wineboot 修正。
+  GitHub Actions + Cachix でビルド結果をキャッシュする workflow も追加。
   なお統合版 `patches/wine-ymm4-complete-2026-10-17.patch` は master 2026-09-23 ベースで
   wine-11.20 には適用できないため、flake では分割版 5 本 + winex11 の 11.20 版を使う。
 

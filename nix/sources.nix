@@ -34,6 +34,10 @@ in
     # Windows の挙動とは異なるので、切り離せるようにしてある。
     compat = ../patches/d2d1/0005-d2d1-Application-compatibility-tweaks-YukkuriMovieMa.patch;
 
+    # wow64 更新時に wineboot が rundll32 ダイアログで止まる問題の修正。
+    # dotnet472 入りの古いプレフィックスを wine 11 で初回更新するときに踏む。
+    setupapi = ../patches/setupapi/0001-setupapi-Skip-registration-of-native-dotNET-and-Gecko-shims.patch;
+
     # wine 11.20 向けの子サーフェイス attach。
     # 旧版 0001-winex11-child-surface-attach.patch は wine 10 系向けで
     # vulkan.c も触るため 11.20 には適用できない。
