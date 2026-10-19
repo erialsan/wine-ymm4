@@ -103,10 +103,10 @@ index 6c830d2..6950068 100644
  
      d2d_command_list_set_antialias_mode(command_list, context->drawing_state.antialiasMode);
 diff --git a/dlls/d2d1/d2d1_private.h b/dlls/d2d1/d2d1_private.h
-index ba6cea7..f1da416 100644
+index ba6cea7..7a52954 100644
 --- a/dlls/d2d1/d2d1_private.h
 +++ b/dlls/d2d1/d2d1_private.h
-@@ -219,6 +219,10 @@ struct d2d_device_context
+@@ -219,6 +219,14 @@ struct d2d_device_context
      D2D1_RENDER_TARGET_PROPERTIES desc;
      D2D1_SIZE_U pixel_size;
      struct d2d_clip_stack clip_stack;
@@ -114,10 +114,14 @@ index ba6cea7..f1da416 100644
 +    unsigned int effect_depth;
 +    unsigned int replay_offset_valid;
 +    D2D1_POINT_2F replay_offset;
++    /* YMM4: transform of the enclosing effect, folded into replayed command lists
++     * because the list records absolute transforms that would clobber it. */
++    unsigned int effect_matrix_valid;
++    D2D1_MATRIX_3X2_F effect_matrix;
  
      struct d2d_indexed_objects vertex_buffers;
  };
-@@ -859,6 +863,7 @@ struct d2d_effect
+@@ -859,6 +867,7 @@ struct d2d_effect
      LONG refcount;
  
      ID2D1EffectImpl *impl;
@@ -126,7 +130,7 @@ index ba6cea7..f1da416 100644
      struct d2d_effect_context *effect_context;
      struct d2d_transform_graph *graph;
 diff --git a/dlls/d2d1/device.c b/dlls/d2d1/device.c
-index 552d6d4..e2206ae 100644
+index 552d6d4..eadd63f 100644
 --- a/dlls/d2d1/device.c
 +++ b/dlls/d2d1/device.c
 @@ -18,6 +18,7 @@
@@ -523,7 +527,7 @@ index 552d6d4..e2206ae 100644
      if (!target)
      {
          d2d_device_context_reset_target(context);
-@@ -2713,16 +2957,354 @@ static void STDMETHODCALLTYPE d2d_device_context_ID2D1DeviceContext_DrawGlyphRun
+@@ -2713,16 +2957,365 @@ static void STDMETHODCALLTYPE d2d_device_context_ID2D1DeviceContext_DrawGlyphRun
      d2d_device_context_draw_glyph_run(context, baseline_origin, glyph_run, glyph_run_desc, brush, measuring_mode);
  }
  
@@ -632,6 +636,17 @@ index 552d6d4..e2206ae 100644
 +         * whole replayed command list, including nested lists and any
 +         * transforms the list records. */
 +        D2D1_MATRIX_3X2_F t = *transform;
++        if (sink->context->effect_matrix_valid)
++        {
++            const D2D1_MATRIX_3X2_F *m = &sink->context->effect_matrix;
++            D2D1_MATRIX_3X2_F r = t;
++            t._11 = m->_11 * r._11 + m->_12 * r._21;
++            t._12 = m->_11 * r._12 + m->_12 * r._22;
++            t._21 = m->_21 * r._11 + m->_22 * r._21;
++            t._22 = m->_21 * r._12 + m->_22 * r._22;
++            t._31 = m->_31 * r._11 + m->_32 * r._21 + r._31;
++            t._32 = m->_31 * r._12 + m->_32 * r._22 + r._32;
++        }
 +        t._31 += sink->context->replay_offset.x;
 +        t._32 += sink->context->replay_offset.y;
 +        ID2D1RenderTarget_SetTransform(SINK_RT(sink), &t);
@@ -878,7 +893,7 @@ index 552d6d4..e2206ae 100644
  
      if (FAILED(context->error.code))
          return;
-@@ -2745,12 +3327,242 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawImage(ID2D1DeviceContext6 *
+@@ -2745,12 +3338,273 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawImage(ID2D1DeviceContext6 *
  
      if (SUCCEEDED(ID2D1Image_QueryInterface(image, &IID_ID2D1Bitmap, (void **)&bitmap)))
      {
@@ -887,7 +902,7 @@ index 552d6d4..e2206ae 100644
 +        D2D1_POINT_2F adj_off;
 +        const D2D1_POINT_2F *use_offset = target_offset;
 +        ID2D1Bitmap *target_bitmap = NULL;
-+
+ 
 +        if (0) fprintf(stderr, "YMM4DIAG:   bitmap %p size %ux%u\n", (void *)bitmap, bsz.width, bsz.height); fflush(stderr);
 +
 +        /* YMM4 composes in a center-origin canvas space. When blitting a leaf
@@ -984,7 +999,7 @@ index 552d6d4..e2206ae 100644
 +                ID2D1SolidColorBrush_Release(dbg_sb);
 +            }
 +        }
- 
++
 +#endif
          ID2D1Bitmap_Release(bitmap);
          return;
@@ -1030,6 +1045,8 @@ index 552d6d4..e2206ae 100644
 +            CLSID id;
 +            D2D1_MATRIX_3X2_F old_transform;
 +            BOOL have_transform = FALSE, have_clip = FALSE, center_compensated = FALSE;
++            BOOL have_effect_matrix = FALSE;
++            D2D1_MATRIX_3X2_F effect_matrix;
 +            D2D1_MATRIX_3X2_F saved_transform;
 +            D2D1_RECT_F clip_rect;
 +
@@ -1084,6 +1101,10 @@ index 552d6d4..e2206ae 100644
 +                    combined._32 = m._31 * old_transform._12 + m._32 * old_transform._22 + old_transform._32;
 +                    if (0) fprintf(stderr, "YMM4DIAG: transform (%s) applied\n", debugstr_guid(&id)); fflush(stderr);
 +                    ID2D1RenderTarget_SetTransform(rt, &combined);
++                    /* YMM4: command lists record absolute transforms and would clobber
++                     * the CTM above, so also fold the effect matrix into replay. */
++                    effect_matrix = m;
++                    have_effect_matrix = TRUE;
 +                    have_transform = TRUE;
 +                }
 +            }
@@ -1106,9 +1127,34 @@ index 552d6d4..e2206ae 100644
 +            ID2D1Effect_GetInput(effect, 0, &input);
 +            if (input)
 +            {
++                unsigned int saved_em_valid = context->effect_matrix_valid;
++                D2D1_MATRIX_3X2_F saved_em = context->effect_matrix;
++                if (have_effect_matrix)
++                {
++                    /* Nested effects: outer matrix applies to the inner result. */
++                    if (saved_em_valid)
++                    {
++                        const D2D1_MATRIX_3X2_F *a = &saved_em, *b = &effect_matrix;
++                        D2D1_MATRIX_3X2_F r;
++                        r._11 = a->_11 * b->_11 + a->_12 * b->_21;
++                        r._12 = a->_11 * b->_12 + a->_12 * b->_22;
++                        r._21 = a->_21 * b->_11 + a->_22 * b->_21;
++                        r._22 = a->_21 * b->_12 + a->_22 * b->_22;
++                        r._31 = a->_31 * b->_11 + a->_32 * b->_21 + b->_31;
++                        r._32 = a->_31 * b->_12 + a->_32 * b->_22 + b->_32;
++                        context->effect_matrix = r;
++                    }
++                    else
++                    {
++                        context->effect_matrix = effect_matrix;
++                    }
++                    context->effect_matrix_valid = 1;
++                }
 +                context->effect_depth++;
 +                d2d_device_context_DrawImage(iface, input, target_offset, image_rect, interpolation_mode, composite_mode);
 +                context->effect_depth--;
++                context->effect_matrix_valid = saved_em_valid;
++                context->effect_matrix = saved_em;
 +                ID2D1Image_Release(input);
 +            }
 +            if (have_clip) ID2D1RenderTarget_PopAxisAlignedClip(rt);
@@ -1122,7 +1168,7 @@ index 552d6d4..e2206ae 100644
      FIXME("Unhandled image %p.\n", image);
  }
  
-@@ -2771,6 +3583,12 @@ static void STDMETHODCALLTYPE d2d_device_context_ID2D1DeviceContext_DrawBitmap(I
+@@ -2771,6 +3625,12 @@ static void STDMETHODCALLTYPE d2d_device_context_ID2D1DeviceContext_DrawBitmap(I
              "src_rect %s, perspective_transform %p.\n",
              iface, bitmap, debug_d2d_rect_f(dst_rect), opacity, interpolation_mode,
              debug_d2d_rect_f(src_rect), perspective_transform);

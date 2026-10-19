@@ -39,6 +39,13 @@ Wine の `d2d1.dll` に不足していた Direct2D のコマンドリスト／�
 含む 5 ファイル一括パッチ。**wine-11.20 のツリーにそのまま `git apply` できます**（Nix flake はこちらを使用）。
 エフェクト登録の実機検証は `scripts/fxprobe.cpp`（mingw でビルドし wine 上で実行、18種の CreateEffect/SetValue/描画を確認）。
 
+**2026-10-19 追記（アイテムの X / Y / 拡大率が効かない件）**: アプリが記録したコマンドリストの
+リプレイが「記録済みの絶対変換 + `replay_offset`」で CTM を上書きするため、効果行列
+（2DAffineTransform / 3DTransform）によるアイテムの移動・拡大が捨てられていた。
+効果行列をリプレイ合成（`effect_matrix · recorded + replay_offset`、ネスト時は外側∘内側）にも
+載せる形で修正済み（統合パッチに反映）。詳細と実測値は
+[docs/effect-transform-replay.md](docs/effect-transform-replay.md)。
+
 ### `patches/winex11/` — Wine 本体（dlls/winex11.drv/）に適用
 
 - `winex11-attach-v3-11.20.patch` — **wine 11.20 向け（推奨）**。`init.c` / `window.c` / `x11drv.h` の 3 ファイル。
@@ -182,6 +189,12 @@ Wine 本体に由来するパッチのため **LGPL-2.1-or-later**（`LICENSE` /
 
 ## 更新履歴
 
+- **2026-10-19**: アイテムの X / Y / 拡大率がプレビュー・書き出しに反映されない件を修正 —
+  `d2d_command_sink_SetTransform()` がコマンドリストの記録変換で CTM を上書きし、効果行列
+  （2DAffineTransform / 3DTransform）の平行移動が失われていた。効果行列をリプレイ合成にも
+  載せる形で修正（`d2d1_private.h` に `effect_matrix_valid` / `effect_matrix` を追加、
+  `device.c` の効果チェーン部で保存・合成・復元）。`patches/d2d1/wine-11.20-d2d1-ymm4-complete.patch`
+  を再生成済み。詳細: [docs/effect-transform-replay.md](docs/effect-transform-replay.md)
 - **2026-10-18**: wow64 更新時の wineboot 停止問題を修正 — `patches/setupapi/0001`
   （ネイティブ mscoree / mshtml の再登録スキップ）。dotnet472 入りの古いプレフィックスを
   wine 11 で初回更新する時の「rundll32 ダイアログで停止」が解消（実測確認済み）。
