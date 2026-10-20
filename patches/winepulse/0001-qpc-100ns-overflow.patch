@@ -1,0 +1,80 @@
+diff --git a/dlls/winealsa.drv/alsa.c b/dlls/winealsa.drv/alsa.c
+index 4ad83bd..8df7865 100644
+--- a/dlls/winealsa.drv/alsa.c
++++ b/dlls/winealsa.drv/alsa.c
+@@ -44,6 +44,17 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(alsa);
+ 
++/* Convert a QPC stamp to 100ns units. The naive
++ * (stamp * 10000000) / freq overflows INT64 once the system has been
++ * running for more than ~25.6 hours at a 10MHz QPC frequency, which
++ * yields a negative value; consumers then compute a bogus, huge
++ * elapsed time. Split the multiplication to keep it exact and bounded. */
++static inline ULONGLONG qpc_to_100ns(const LARGE_INTEGER *stamp, const LARGE_INTEGER *freq)
++{
++    return (stamp->QuadPart / freq->QuadPart) * 10000000ULL
++         + ((stamp->QuadPart % freq->QuadPart) * 10000000ULL) / freq->QuadPart;
++}
++
+ struct alsa_stream
+ {
+     snd_pcm_t *pcm_handle;
+@@ -1810,7 +1821,7 @@ static NTSTATUS alsa_get_capture_buffer(void *args)
+     if(params->qpcpos){ /* fixme: qpc of recording time */
+         LARGE_INTEGER stamp, freq;
+         NtQueryPerformanceCounter(&stamp, &freq);
+-        *params->qpcpos = (stamp.QuadPart * (INT64)10000000) / freq.QuadPart;
++        *params->qpcpos = qpc_to_100ns(&stamp, &freq);
+     }
+ 
+     return alsa_unlock_result(stream, &params->result, *frames ? S_OK : AUDCLNT_S_BUFFER_EMPTY);
+@@ -2181,7 +2192,7 @@ static NTSTATUS alsa_get_position(void *args)
+     if(params->qpctime){
+         LARGE_INTEGER stamp, freq;
+         NtQueryPerformanceCounter(&stamp, &freq);
+-        *params->qpctime = (stamp.QuadPart * (INT64)10000000) / freq.QuadPart;
++        *params->qpctime = qpc_to_100ns(&stamp, &freq);
+     }
+ 
+     return alsa_unlock_result(stream, &params->result, S_OK);
+diff --git a/dlls/winepulse.drv/pulse.c b/dlls/winepulse.drv/pulse.c
+index ef13a1e..28c664e 100644
+--- a/dlls/winepulse.drv/pulse.c
++++ b/dlls/winepulse.drv/pulse.c
+@@ -47,6 +47,17 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(pulse);
+ 
++/* Convert a QPC stamp to 100ns units. The naive
++ * (stamp * 10000000) / freq overflows INT64 once the system has been
++ * running for more than ~25.6 hours at a 10MHz QPC frequency, which
++ * yields a negative value; consumers then compute a bogus, huge
++ * elapsed time. Split the multiplication to keep it exact and bounded. */
++static inline ULONGLONG qpc_to_100ns(const LARGE_INTEGER *stamp, const LARGE_INTEGER *freq)
++{
++    return (stamp->QuadPart / freq->QuadPart) * 10000000ULL
++         + ((stamp->QuadPart % freq->QuadPart) * 10000000ULL) / freq->QuadPart;
++}
++
+ enum phys_device_bus_type {
+     phys_device_bus_invalid = -1,
+     phys_device_bus_pci,
+@@ -1510,7 +1521,7 @@ static void pulse_read(struct pulse_stream *stream)
+                 stream->held_bytes += stream->period_bytes;
+             }
+             NtQueryPerformanceCounter(&stamp, &freq);
+-            p->qpcpos = (stamp.QuadPart * (INT64)10000000) / freq.QuadPart;
++            p->qpcpos = qpc_to_100ns(&stamp, &freq);
+             p->discont = 0;
+             list_remove(&p->entry);
+             list_add_tail(&stream->packet_filled_head, &p->entry);
+@@ -2336,7 +2347,7 @@ static NTSTATUS pulse_get_position(void *args)
+     {
+         LARGE_INTEGER stamp, freq;
+         NtQueryPerformanceCounter(&stamp, &freq);
+-        *params->qpctime = (stamp.QuadPart * (INT64)10000000) / freq.QuadPart;
++        *params->qpctime = qpc_to_100ns(&stamp, &freq);
+     }
+ 
+     params->result = S_OK;

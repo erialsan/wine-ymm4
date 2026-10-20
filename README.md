@@ -56,6 +56,15 @@ Wine の `d2d1.dll` に不足していた Direct2D のコマンドリスト／�
 選択枠・ドラッグ追従・複数アイテムの判別まで実測で動作する。詳細と実測値は
 [docs/preview-hit-test-bounds.md](docs/preview-hit-test-bounds.md)。
 
+### `patches/winepulse/` — Wine 本体（dlls/winepulse.drv/ / dlls/winealsa.drv/）に適用
+
+- `0001-qpc-100ns-overflow.patch` — **再生が一瞬で末尾まで飛ぶ件の修正**。
+  `*params->qpctime = (stamp.QuadPart * (INT64)10000000) / freq.QuadPart;`（`winepulse` 2箇所・
+  `winealsa` 2箇所）は、QPC 周波数 10MHz の環境で **稼働 25.6 時間を超えると INT64 が溢れて負値**になる
+  （例: `qpc=18446743283032628321`）。YMM4 は音声ストリームの再生位置を再生時計に使うため、
+  負の時刻から巨大な経過時間が算出され「終端に到達した」と即判定して再生が止まる。
+  桁あふれしない `qpc_to_100ns()`（商と剰余に分割）に置換する。wine 11.18 / 11.20 の両方に `patch -p1` で適用可。
+
 ### `patches/winex11/` — Wine 本体（dlls/winex11.drv/）に適用
 
 - `winex11-attach-v3-11.20.patch` — **wine 11.20 向け（推奨）**。`init.c` / `window.c` / `x11drv.h` の 3 ファイル。
@@ -199,6 +208,12 @@ Wine 本体に由来するパッチのため **LGPL-2.1-or-later**（`LICENSE` /
 
 ## 更新履歴
 
+- **2026-10-20 (2)**: 再生が一瞬で末尾まで飛ぶ件を修正 — QPC(10MHz) の
+  `stamp * 10000000 / freq` が OS 稼働 25.6 時間超で INT64 溢れを起こし、負の時刻から
+  巨大な経過時間が計算されて「終端到達」と誤判定していた。`qpc_to_100ns()`（商と剰余に分割）へ置換
+  （`dlls/winepulse.drv/pulse.c` 2箇所・`dlls/winealsa.drv/alsa.c` 2箇所）。
+  実測: 600秒プロジェクトで 0.8秒→0.48秒 / 4.3秒→4.31秒 / 21.7秒→21.76秒 と等倍進行。
+  パッチ: `patches/winepulse/0001-qpc-100ns-overflow.patch`
 - **2026-10-20**: プレビューのアイテムがクリックで選択できない／選択枠がアイテムに追従しない件を修正 —
   Wine の `GetImageLocalBounds()` が `ID2D1CommandList` に空矩形を返すため当たり判定クアッドが縮退していた。
   コマンドリスト記録時に描画範囲を累積（`fill_rectangle` / `draw_rectangle` / `draw_bitmap` /
