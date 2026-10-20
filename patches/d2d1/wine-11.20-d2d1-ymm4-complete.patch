@@ -1,5 +1,5 @@
 diff --git a/dlls/d2d1/bitmap.c b/dlls/d2d1/bitmap.c
-index c6ab60c..f475328 100644
+index c6ab60c..35cf520 100644
 --- a/dlls/d2d1/bitmap.c
 +++ b/dlls/d2d1/bitmap.c
 @@ -176,6 +176,11 @@ static HRESULT STDMETHODCALLTYPE d2d_bitmap_CopyFromBitmap(ID2D1Bitmap1 *iface,
@@ -14,20 +14,7 @@ index c6ab60c..f475328 100644
      ID3D11DeviceContext_Release(context);
      ID3D11Device_Release(device);
  
-@@ -277,6 +282,12 @@ static HRESULT STDMETHODCALLTYPE d2d_bitmap_GetSurface(ID2D1Bitmap1 *iface, IDXG
- static HRESULT STDMETHODCALLTYPE d2d_bitmap_Map(ID2D1Bitmap1 *iface, D2D1_MAP_OPTIONS options,
-         D2D1_MAPPED_RECT *mapped_rect)
- {
-+    {
-+        struct d2d_bitmap *dbg_mb = impl_from_ID2D1Bitmap1(iface);
-+        if (0) fprintf(stderr, "YMM4DIAG: bitmapMap %ux%u opts=%u\n",
-+                dbg_mb->pixel_size.width, dbg_mb->pixel_size.height, dbg_mb->options);
-+        fflush(stderr);
-+    }
-     struct d2d_bitmap *bitmap = impl_from_ID2D1Bitmap1(iface);
-     D3D11_MAPPED_SUBRESOURCE mapped_resource;
-     ID3D11DeviceContext *context;
-@@ -416,6 +427,14 @@ static void d2d_bitmap_init(struct d2d_bitmap *bitmap, struct d2d_device_context
+@@ -416,6 +421,14 @@ static void d2d_bitmap_init(struct d2d_bitmap *bitmap, struct d2d_device_context
      {
          if (FAILED(hr = ID3D11Device_CreateRenderTargetView(d3d_device, resource, NULL, &bitmap->rtv)))
              WARN("Failed to create RTV, hr %#lx.\n", hr);
@@ -43,7 +30,7 @@ index c6ab60c..f475328 100644
  
      if (!(bitmap->options & D2D1_BITMAP_OPTIONS_CANNOT_DRAW))
 diff --git a/dlls/d2d1/command_list.c b/dlls/d2d1/command_list.c
-index 6c830d2..59eaa76 100644
+index 6c830d2..05bd4ed 100644
 --- a/dlls/d2d1/command_list.c
 +++ b/dlls/d2d1/command_list.c
 @@ -224,6 +224,122 @@ static inline struct d2d_command_list *impl_from_ID2D1CommandList(ID2D1CommandLi
@@ -174,7 +161,7 @@ index 6c830d2..59eaa76 100644
      TRACE("iface %p, sink %p.\n", iface, sink);
  
 -    if (command_list->state != D2D_COMMAND_LIST_STATE_CLOSED) return S_OK;
-+    if (0) fprintf(stderr, "YMM4DIAG: CLstream %p state=%d size=%zu\n", (void *)command_list, command_list->state, command_list->size); fflush(stderr);
++    if (0) fprintf(stderr, "YMM4DIAG: CLstream %p state=%d size=%u\n", (void *)command_list, command_list->state, (unsigned int)command_list->size); fflush(stderr);
 +    if (command_list->state != D2D_COMMAND_LIST_STATE_CLOSED && command_list->state != D2D_COMMAND_LIST_STATE_OPEN) return S_OK;
  
      if (FAILED(hr = ID2D1CommandSink_BeginDraw(sink)))
@@ -199,7 +186,7 @@ index 6c830d2..59eaa76 100644
  
      command_list->state = D2D_COMMAND_LIST_STATE_CLOSED;
  
-+    if (0) fprintf(stderr, "YMM4DIAG: CLclose %p size=%zu\n", (void *)command_list, command_list->size); fflush(stderr);
++    if (0) fprintf(stderr, "YMM4DIAG: CLclose %p size=%u\n", (void *)command_list, (unsigned int)command_list->size); fflush(stderr);
 +
      /* FIXME: reset as a target */
  
@@ -221,7 +208,7 @@ index 6c830d2..59eaa76 100644
      }
  }
  
-@@ -727,8 +854,19 @@ void d2d_command_list_begin_draw(struct d2d_command_list *command_list,
+@@ -727,8 +854,22 @@ void d2d_command_list_begin_draw(struct d2d_command_list *command_list,
  {
      if (command_list->state != D2D_COMMAND_LIST_STATE_INITIAL)
      {
@@ -232,7 +219,10 @@ index 6c830d2..59eaa76 100644
 +         * them ERROR here, which silently kills every later replay (black frames). */
 +        if (0) fprintf(stderr, "YMM4DIAG: CLbegin %p old_state=%d -> reset\n", (void *)command_list, command_list->state); fflush(stderr);
 +        while (command_list->objects_count)
-+            IUnknown_Release(command_list->objects[--command_list->objects_count]);
++        {
++            command_list->objects_count--;
++            IUnknown_Release(command_list->objects[command_list->objects_count]);
++        }
 +        command_list->size = 0;
 +        command_list->bounds_valid = 0;
 +        command_list->state = D2D_COMMAND_LIST_STATE_INITIAL;
@@ -243,7 +233,7 @@ index 6c830d2..59eaa76 100644
      }
  
      d2d_command_list_set_antialias_mode(command_list, context->drawing_state.antialiasMode);
-@@ -869,6 +1007,15 @@ void d2d_command_list_draw_rectangle(struct d2d_command_list *command_list, cons
+@@ -869,6 +1010,15 @@ void d2d_command_list_draw_rectangle(struct d2d_command_list *command_list, cons
          command->brush = brush;
          command->stroke_width = stroke_width;
          command->stroke_style = stroke_style;
@@ -259,7 +249,7 @@ index 6c830d2..59eaa76 100644
      }
  }
  
-@@ -896,6 +1043,11 @@ void d2d_command_list_fill_geometry(struct d2d_command_list *command_list,
+@@ -896,6 +1046,11 @@ void d2d_command_list_fill_geometry(struct d2d_command_list *command_list,
          command->geometry = geometry;
          command->brush = brush;
          command->opacity_brush = opacity_brush;
@@ -271,7 +261,7 @@ index 6c830d2..59eaa76 100644
      }
  }
  
-@@ -913,6 +1065,7 @@ void d2d_command_list_fill_rectangle(struct d2d_command_list *command_list,
+@@ -913,6 +1068,7 @@ void d2d_command_list_fill_rectangle(struct d2d_command_list *command_list,
          command->c.op = D2D_COMMAND_FILL_RECTANGLE;
          command->rect = *rect;
          command->brush = brush;
@@ -279,7 +269,7 @@ index 6c830d2..59eaa76 100644
      }
  }
  
-@@ -1072,6 +1225,19 @@ void d2d_command_list_draw_bitmap(struct d2d_command_list *command_list, ID2D1Bi
+@@ -1072,6 +1228,19 @@ void d2d_command_list_draw_bitmap(struct d2d_command_list *command_list, ID2D1Bi
  
          d2d_command_list_write_field(&data, &command->dst_rect, dst_rect, sizeof(*dst_rect));
          d2d_command_list_write_field(&data, &command->src_rect, src_rect, sizeof(*src_rect));
@@ -299,7 +289,7 @@ index 6c830d2..59eaa76 100644
          d2d_command_list_write_field(&data, &command->perspective_transform, perspective_transform,
                  sizeof(*perspective_transform));
      }
-@@ -1102,6 +1268,11 @@ void d2d_command_list_draw_image(struct d2d_command_list *command_list, ID2D1Ima
+@@ -1102,6 +1271,11 @@ void d2d_command_list_draw_image(struct d2d_command_list *command_list, ID2D1Ima
  
          d2d_command_list_write_field(&data, &command->target_offset, target_offset, sizeof(*target_offset));
          d2d_command_list_write_field(&data, &command->image_rect, image_rect, sizeof(*image_rect));
@@ -358,7 +348,7 @@ index ba6cea7..304db8d 100644
  struct d2d_command_list *unsafe_impl_from_ID2D1CommandList(ID2D1CommandList *iface);
  void d2d_command_list_begin_draw(struct d2d_command_list *command_list, const struct d2d_device_context *context);
 diff --git a/dlls/d2d1/device.c b/dlls/d2d1/device.c
-index 552d6d4..ef7d617 100644
+index 552d6d4..0fb608a 100644
 --- a/dlls/d2d1/device.c
 +++ b/dlls/d2d1/device.c
 @@ -18,6 +18,10 @@
@@ -383,7 +373,7 @@ index 552d6d4..ef7d617 100644
 +            if (0) fprintf(stderr, "YMM4DIAG: DRAW#%u vp=%.0fx%.0f scissor=(%ld,%ld,%ld,%ld) rtv=%p clips=%u tgt=%p\n",
 +                    dbg_drawcnt, vp.Width, vp.Height,
 +                    (long)scissor_rect.left, (long)scissor_rect.top, (long)scissor_rect.right, (long)scissor_rect.bottom,
-+                    (void *)render_target->target.bitmap->rtv, render_target->clip_stack.count,
++                    (void *)render_target->target.bitmap->rtv, (unsigned int)render_target->clip_stack.count,
 +                    (void *)render_target->target.bitmap);
 +        fflush(stderr);
 +    }
@@ -459,7 +449,7 @@ index 552d6d4..ef7d617 100644
  
 +    if (YMM4DIAG) fprintf(stderr, "YMM4DIAG: PushClip (%.0f,%.0f,%.0f,%.0f) clips_before=%u ttype=%d\n",
 +            clip_rect->left, clip_rect->top, clip_rect->right, clip_rect->bottom,
-+            context->clip_stack.count, context->target.type);
++            (unsigned int)context->clip_stack.count, context->target.type);
 +    fflush(stderr);
 +
      if (context->target.type == D2D_TARGET_COMMAND_LIST)
@@ -469,7 +459,7 @@ index 552d6d4..ef7d617 100644
  
      TRACE("iface %p.\n", iface);
  
-+    if (YMM4DIAG) fprintf(stderr, "YMM4DIAG: PopClip clips_before=%u ttype=%d\n", context->clip_stack.count, context->target.type);
++    if (YMM4DIAG) fprintf(stderr, "YMM4DIAG: PopClip clips_before=%u ttype=%d\n", (unsigned int)context->clip_stack.count, context->target.type);
 +    fflush(stderr);
 +
      if (context->target.type == D2D_TARGET_COMMAND_LIST)
@@ -488,7 +478,7 @@ index 552d6d4..ef7d617 100644
      }
 +    if (0) fprintf(stderr, "YMM4DIAG: ClearLR color=(%.2f,%.2f,%.2f,%.2f) tgt=%p ttype=%d clips=%u\n",
 +            colour ? colour->r : 0, colour ? colour->g : 0, colour ? colour->b : 0, colour ? colour->a : 0,
-+            (void *)context->target.object, context->target.type, context->clip_stack.count);
++            (void *)context->target.object, context->target.type, (unsigned int)context->clip_stack.count);
 +    fflush(stderr);
  
      ID3D11Device1_GetImmediateContext(context->d3d_device, &d3d_context);
@@ -619,22 +609,25 @@ index 552d6d4..ef7d617 100644
      if (context->ops && context->ops->device_context_present)
      {
          if (FAILED(hr = context->ops->device_context_present(context->outer_unknown)))
-@@ -2274,6 +2432,14 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_CreateBitmapFromDxgiSurface(
+@@ -2274,6 +2432,17 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_CreateBitmapFromDxgiSurface(
      HRESULT hr;
  
      TRACE("iface %p, surface %p, desc %p, bitmap %p.\n", iface, surface, desc, bitmap);
 +    {
 +        DXGI_SURFACE_DESC dbg_ssd;
-+        if (surface && SUCCEEDED(IDXGISurface_GetDesc(surface, &dbg_ssd)))
-+            if (0) fprintf(stderr, "YMM4DIAG: CBFDS surface %ux%u fmt=%u\n", dbg_ssd.Width, dbg_ssd.Height, dbg_ssd.Format);
-+        else
-+            if (0) fprintf(stderr, "YMM4DIAG: CBFDS surface ?\n");
-+        fflush(stderr);
++        if (0)
++        {
++            if (surface && SUCCEEDED(IDXGISurface_GetDesc(surface, &dbg_ssd)))
++                fprintf(stderr, "YMM4DIAG: CBFDS surface %ux%u fmt=%u\n", dbg_ssd.Width, dbg_ssd.Height, dbg_ssd.Format);
++            else
++                fprintf(stderr, "YMM4DIAG: CBFDS surface ?\n");
++            fflush(stderr);
++        }
 +    }
  
      surface_options = d2d_get_bitmap_options_for_surface(surface);
  
-@@ -2304,7 +2470,10 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_CreateBitmapFromDxgiSurface(
+@@ -2304,7 +2473,10 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_CreateBitmapFromDxgiSurface(
      }
  
      if (SUCCEEDED(hr = d2d_bitmap_create_shared(context, &IID_IDXGISurface, surface, desc, &object)))
@@ -645,7 +638,7 @@ index 552d6d4..ef7d617 100644
  
      return hr;
  }
-@@ -2316,7 +2485,11 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_CreateEffect(ID2D1DeviceCont
+@@ -2316,7 +2488,11 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_CreateEffect(ID2D1DeviceCont
  
      TRACE("iface %p, effect_id %s, effect %p.\n", iface, debugstr_guid(effect_id), effect);
  
@@ -658,7 +651,7 @@ index 552d6d4..ef7d617 100644
  }
  
  static HRESULT STDMETHODCALLTYPE d2d_device_context_ID2D1DeviceContext_CreateGradientStopCollection(
-@@ -2420,15 +2593,82 @@ static BOOL STDMETHODCALLTYPE d2d_device_context_IsBufferPrecisionSupported(ID2D
+@@ -2420,15 +2596,82 @@ static BOOL STDMETHODCALLTYPE d2d_device_context_IsBufferPrecisionSupported(ID2D
      return !!(support & D3D11_FORMAT_SUPPORT_BUFFER);
  }
  
@@ -741,7 +734,7 @@ index 552d6d4..ef7d617 100644
  
      if (SUCCEEDED(ID2D1Image_QueryInterface(image, &IID_ID2D1Bitmap, (void **)&bitmap)))
      {
-@@ -2452,24 +2692,124 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_GetImageLocalBounds(ID2D1Dev
+@@ -2452,24 +2695,124 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_GetImageLocalBounds(ID2D1Dev
                  WARN("Unknown unit mode %#x.\n", context->drawing_state.unitMode);
                  break;
          }
@@ -870,7 +863,7 @@ index 552d6d4..ef7d617 100644
  }
  
  static HRESULT STDMETHODCALLTYPE d2d_device_context_GetGlyphRunWorldBounds(ID2D1DeviceContext6 *iface,
-@@ -2568,6 +2908,26 @@ static void STDMETHODCALLTYPE d2d_device_context_SetTarget(ID2D1DeviceContext6 *
+@@ -2568,6 +2911,26 @@ static void STDMETHODCALLTYPE d2d_device_context_SetTarget(ID2D1DeviceContext6 *
  
      TRACE("iface %p, target %p.\n", iface, target);
  
@@ -897,7 +890,7 @@ index 552d6d4..ef7d617 100644
      if (!target)
      {
          d2d_device_context_reset_target(context);
-@@ -2713,16 +3073,374 @@ static void STDMETHODCALLTYPE d2d_device_context_ID2D1DeviceContext_DrawGlyphRun
+@@ -2713,16 +3076,374 @@ static void STDMETHODCALLTYPE d2d_device_context_ID2D1DeviceContext_DrawGlyphRun
      d2d_device_context_draw_glyph_run(context, baseline_origin, glyph_run, glyph_run_desc, brush, measuring_mode);
  }
  
@@ -1272,7 +1265,7 @@ index 552d6d4..ef7d617 100644
  
      if (FAILED(context->error.code))
          return;
-@@ -2745,12 +3463,277 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawImage(ID2D1DeviceContext6 *
+@@ -2745,12 +3466,277 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawImage(ID2D1DeviceContext6 *
  
      if (SUCCEEDED(ID2D1Image_QueryInterface(image, &IID_ID2D1Bitmap, (void **)&bitmap)))
      {
@@ -1551,7 +1544,7 @@ index 552d6d4..ef7d617 100644
      FIXME("Unhandled image %p.\n", image);
  }
  
-@@ -2771,6 +3754,12 @@ static void STDMETHODCALLTYPE d2d_device_context_ID2D1DeviceContext_DrawBitmap(I
+@@ -2771,6 +3757,12 @@ static void STDMETHODCALLTYPE d2d_device_context_ID2D1DeviceContext_DrawBitmap(I
              "src_rect %s, perspective_transform %p.\n",
              iface, bitmap, debug_d2d_rect_f(dst_rect), opacity, interpolation_mode,
              debug_d2d_rect_f(src_rect), perspective_transform);
@@ -1565,7 +1558,7 @@ index 552d6d4..ef7d617 100644
      if (FAILED(context->error.code))
          return;
 diff --git a/dlls/d2d1/effect.c b/dlls/d2d1/effect.c
-index c298aec..6bcdfa5 100644
+index c298aec..b8f81f4 100644
 --- a/dlls/d2d1/effect.c
 +++ b/dlls/d2d1/effect.c
 @@ -17,6 +17,7 @@
@@ -1581,38 +1574,49 @@ index c298aec..6bcdfa5 100644
  }
  
 -static const WCHAR color_management_description[] =
--L"<?xml version='1.0'?>                                                   \
--  <Effect>                                                                \
++static const CLSID opacity_metadata_clsid = {0x6c53006a,0x4450,0x4199,{0xaa,0x5b,0xad,0x16,0x56,0xfe,0xce,0x5e}};
++static const CLSID opacity_clsid = {0x811d79a4,0xde28,0x4454,{0x80,0x94,0xc6,0x46,0x85,0xf8,0xbd,0x4c}};
++
++static const WCHAR opacity_metadata_description[] =
+ L"<?xml version='1.0'?>                                                   \
+   <Effect>                                                                \
 -    <Property name='DisplayName' type='string' value='Color Management'/> \
--    <Property name='Author'      type='string' value='The Wine Project'/> \
--    <Property name='Category'    type='string' value='Stub'/>             \
++    <Property name='DisplayName' type='string' value='Opacity metadata'/> \
+     <Property name='Author'      type='string' value='The Wine Project'/> \
+     <Property name='Category'    type='string' value='Stub'/>             \
 -    <Property name='Description' type='string' value='Color Management'/> \
--    <Inputs>                                                              \
--      <Input name='Source'/>                                              \
--    </Inputs>                                                             \
++    <Property name='Description' type='string' value='Opacity metadata'/> \
+     <Inputs>                                                              \
+       <Input name='Source'/>                                              \
+     </Inputs>                                                             \
 -    <Property name='SourceColorContext' type='iunknown' />                \
 -    <Property name='SourceRenderingIntent' type='enum' />                 \
 -    <Property name='DestinationColorContext' type='iunknown' />           \
 -    <Property name='DestinationRenderingIntent' type='enum' />            \
 -    <Property name='AlphaMode' type='enum' />                             \
 -    <Property name='Quality' type='enum' />                               \
-+static const CLSID opacity_metadata_clsid = {0x6c53006a,0x4450,0x4199,{0xaa,0x5b,0xad,0x16,0x56,0xfe,0xce,0x5e}};
-+static const CLSID opacity_clsid = {0x811d79a4,0xde28,0x4454,{0x80,0x94,0xc6,0x46,0x85,0xf8,0xbd,0x4c}};
-+
-+static const WCHAR opacity_metadata_description[] =
-+L"<?xml version='1.0'?>                                                   \\
-+  <Effect>                                                                \\
-+    <Property name='DisplayName' type='string' value='Opacity metadata'/> \\
-+    <Property name='Author'      type='string' value='The Wine Project'/> \\
-+    <Property name='Category'    type='string' value='Stub'/>             \\
-+    <Property name='Description' type='string' value='Opacity metadata'/> \\
-+    <Inputs>                                                              \\
-+      <Input name='Source'/>                                              \\
-+    </Inputs>                                                             \\
    </Effect>";
  
 -struct color_management_properties
 +static HRESULT __stdcall opacity_metadata_factory(IUnknown **effect)
++{
++    return d2d_effect_create_impl(effect, NULL, 0);
++}
++
++static const WCHAR opacity_description[] =
++L"<?xml version='1.0'?>                                                   \
++  <Effect>                                                                \
++    <Property name='DisplayName' type='string' value='Opacity'/>          \
++    <Property name='Author'      type='string' value='The Wine Project'/> \
++    <Property name='Category'    type='string' value='Stub'/>             \
++    <Property name='Description' type='string' value='Opacity'/>          \
++    <Inputs>                                                              \
++      <Input name='Source'/>                                              \
++    </Inputs>                                                             \
++    <Property name='Opacity' type='float'/>                               \
++  </Effect>";
++
++struct opacity_properties
  {
 -    ID2D1ColorContext *source_color_context;
 -    D2D1_COLORMANAGEMENT_RENDERING_INTENT source_rendering_intent;
@@ -1620,24 +1624,6 @@ index c298aec..6bcdfa5 100644
 -    D2D1_COLORMANAGEMENT_RENDERING_INTENT destination_rendering_intent;
 -    D2D1_COLORMANAGEMENT_ALPHA_MODE alpha_mode;
 -    D2D1_COLORMANAGEMENT_QUALITY quality;
-+    return d2d_effect_create_impl(effect, NULL, 0);
-+}
-+
-+static const WCHAR opacity_description[] =
-+L"<?xml version='1.0'?>                                                   \\
-+  <Effect>                                                                \\
-+    <Property name='DisplayName' type='string' value='Opacity'/>          \\
-+    <Property name='Author'      type='string' value='The Wine Project'/> \\
-+    <Property name='Category'    type='string' value='Stub'/>             \\
-+    <Property name='Description' type='string' value='Opacity'/>          \\
-+    <Inputs>                                                              \\
-+      <Input name='Source'/>                                              \\
-+    </Inputs>                                                             \\
-+    <Property name='Opacity' type='float'/>                               \\
-+  </Effect>";
-+
-+struct opacity_properties
-+{
 +    float opacity;
  };
  
@@ -1675,16 +1661,16 @@ index c298aec..6bcdfa5 100644
 +static const CLSID alpha_mask_clsid = {0xc80ecff0,0x3fd5,0x4f05,{0x83,0x28,0xc5,0xd1,0x72,0x4b,0x4f,0x0a}};
 +
 +static const WCHAR alpha_mask_description[] =
-+L"<?xml version='1.0'?>                                                   \\
-+  <Effect>                                                                \\
-+    <Property name='DisplayName' type='string' value='Alpha mask'/>       \\
-+    <Property name='Author'      type='string' value='The Wine Project'/> \\
-+    <Property name='Category'    type='string' value='Stub'/>             \\
-+    <Property name='Description' type='string' value='Alpha mask'/>       \\
-+    <Inputs>                                                              \\
-+      <Input name='Source'/>                                              \\
-+      <Input name='Mask'/>                                                \\
-+    </Inputs>                                                             \\
++L"<?xml version='1.0'?>                                                   \
++  <Effect>                                                                \
++    <Property name='DisplayName' type='string' value='Alpha mask'/>       \
++    <Property name='Author'      type='string' value='The Wine Project'/> \
++    <Property name='Category'    type='string' value='Stub'/>             \
++    <Property name='Description' type='string' value='Alpha mask'/>       \
++    <Inputs>                                                              \
++      <Input name='Source'/>                                              \
++      <Input name='Mask'/>                                                \
++    </Inputs>                                                             \
 +  </Effect>";
 +
 +static HRESULT __stdcall alpha_mask_factory(IUnknown **effect)

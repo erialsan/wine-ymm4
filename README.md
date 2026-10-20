@@ -56,6 +56,11 @@ Wine の `d2d1.dll` に不足していた Direct2D のコマンドリスト／�
 選択枠・ドラッグ追従・複数アイテムの判別まで実測で動作する。詳細と実測値は
 [docs/preview-hit-test-bounds.md](docs/preview-hit-test-bounds.md)。
 
+**2026-10-20 追記（統合パッチのビルド）**: 上記統合パッチは wine 11.20 のツリーで
+`make -C dlls/d2d1` が **rc=0 で完走**することを実測確認済み（`-Werror` の指摘を全て解消）。
+生成した `d2d1.dll` を `/opt/wine11up` と各 prefix に配備し、プレビュー描画・クリック選択・
+選択枠の追従・等倍再生を :99 で再確認している。
+
 ### `patches/winepulse/` — Wine 本体（dlls/winepulse.drv/ / dlls/winealsa.drv/）に適用
 
 - `0001-qpc-100ns-overflow.patch` — **再生が一瞬で末尾まで飛ぶ件の修正**。
@@ -71,8 +76,14 @@ Wine の `d2d1.dll` に不足していた Direct2D のコマンドリスト／�
   子ウィンドウサーフェスをトップレベル窓内に直接アタッチ表示する（下記 0001 と同機能の 11.20 移植版）。
 - `0001` **child surface attach**（旧版・wine 10 系向け） — ネイティブ DXVK は Wine の present コールバックを
   呼ばないため、プレビュー子窓が「オフスクリーン合成扱い → 不可視」になり描画が届かない問題の回避策。
+- `0002-winex11-screen-capture-composite-root.patch` — **色スポイトが常に黒になる件の修正**（wine 11.20 の `bitblt.c`）。
+  KWin(Wayland/Xwayland) のようにコンポジットしている環境では **X のルートウィンドウに画素が存在しない**ため、
+  Wine の `BitBlt(GetDC(NULL), ...)` / `GetPixel` が常に真っ黒を返す。ルートが全黒のときだけ可視トップレベル窓を
+  下から上へ `XGetImage` して一時 Pixmap に合成する（通常の X サーバでは従来どおり 1 回の `XGetImage`）。
+  環境変数は不要。実測: メモ帳の白 `FFFFFF` / YMM4 プレビューの写真色 `E3CEAF`、`:99`(Xvfb) では従来経路のまま。
+  詳細: [patches/winex11/README-screen-capture.md](patches/winex11/README-screen-capture.md)
 
-いずれも環境変数 `WINE_X11_CHILD_SURFACE_ATTACH=1` で有効化します。
+`0001` / `winex11-attach-v3-11.20.patch` は環境変数 `WINE_X11_CHILD_SURFACE_ATTACH=1` で有効化します。
 
 ### `patches/setupapi/` — Wine 本体（dlls/setupapi/）に適用
 
@@ -208,6 +219,18 @@ Wine 本体に由来するパッチのため **LGPL-2.1-or-later**（`LICENSE` /
 
 ## 更新履歴
 
+- **2026-10-20 (4)**: `patches/d2d1/wine-11.20-d2d1-ymm4-complete.patch` を **wine 11.20 でそのまま
+  `make` が通る状態に修正**（それまでは `git apply` は通るがビルドが `-Werror` で失敗していた）。
+  修正点: エフェクト登録用 XML 文字列の行末が `\\` になっていて行連結が壊れていた（29行、`\040` エラー）／
+  `%zu`（Wine の書式チェッカ非対応）を `%u`+キャストへ／`objects[--count]` の sequence-point 警告／
+  `else` ぶら下がり警告／宣言と文の混在警告。**11.20 ツリーで `make -C dlls/d2d1` が rc=0**、
+  生成した `d2d1.dll` を配備して :99 で再検証（プレビュー描画・クリック選択・選択枠の追従・
+  再生が等倍 2.96秒/5.00秒 → 5.00秒 で終端）を実測確認。
+- **2026-10-20 (3)**: 色スポイトが常に黒くなる件を修正（`dlls/winex11.drv/bitblt.c`）。
+  KWin(Wayland/Xwayland) では X のルートウィンドウに画素が無く（`ffmpeg -f x11grab -i :0.0` で全画素 0・平均 0.0）、
+  `BitBlt(GetDC(NULL))` / `GetPixel` が常に黒を返していた。ルートが全黒のときだけ可視トップレベル窓を
+  下から上へ `XGetImage` して合成。実測: メモ帳の白 `FFFFFF`、YMM4 プレビューの写真色 `E3CEAF`。
+  パッチ: `patches/winex11/0002-winex11-screen-capture-composite-root.patch`
 - **2026-10-20 (2)**: 再生が一瞬で末尾まで飛ぶ件を修正 — QPC(10MHz) の
   `stamp * 10000000 / freq` が OS 稼働 25.6 時間超で INT64 溢れを起こし、負の時刻から
   巨大な経過時間が計算されて「終端到達」と誤判定していた。`qpc_to_100ns()`（商と剰余に分割）へ置換

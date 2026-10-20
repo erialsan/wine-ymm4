@@ -1,0 +1,131 @@
+diff --git a/dlls/winex11.drv/bitblt.c b/dlls/winex11.drv/bitblt.c
+index 1f91040..928f446 100644
+--- a/dlls/winex11.drv/bitblt.c
++++ b/dlls/winex11.drv/bitblt.c
+@@ -1309,6 +1309,106 @@ update_format:
+     return ERROR_BAD_FORMAT;
+ }
+ 
++/***********************************************************************
++ *           capture_window_tree
++ *
++ * Recursively copy the visible content of the window tree below "win" into
++ * dst, restricted to the root window rectangle (x,y)-(x+width,y+height).
++ * Windows are composited in stacking order (XQueryTree returns bottom first).
++ */
++static void capture_window_tree( Window win, int x, int y, int width, int height,
++                                 Pixmap dst, GC gc, unsigned int depth )
++{
++    Window root_ret, parent_ret, child_ret, *children = NULL;
++    unsigned int count = 0, i;
++
++    if (!XQueryTree( gdi_display, win, &root_ret, &parent_ret, &children, &count )) return;
++
++    for (i = 0; i < count; i++)
++    {
++        XWindowAttributes attr;
++        XImage *img;
++        int wx, wy, ix, iy, iw, ih;
++
++        if (!XGetWindowAttributes( gdi_display, children[i], &attr )) continue;
++        if (attr.map_state != IsViewable) continue;
++        if (attr.class == InputOnly) continue;
++        if ((unsigned int)attr.depth != depth) continue;  /* can't blend different depths */
++        if (attr.width <= 0 || attr.height <= 0) continue;
++
++        if (!XTranslateCoordinates( gdi_display, children[i], root_window, 0, 0, &wx, &wy, &child_ret ))
++            continue;
++
++        ix = wx > x ? wx : x;
++        iy = wy > y ? wy : y;
++        iw = (wx + attr.width < x + width ? wx + attr.width : x + width) - ix;
++        ih = (wy + attr.height < y + height ? wy + attr.height : y + height) - iy;
++        if (iw <= 0 || ih <= 0) continue;
++
++        /* BadWindow/BadDrawable/BadGC on gdi_display are ignored by the global
++         * error handler, so a redirected or dying window simply stays black */
++        img = XGetImage( gdi_display, children[i], ix - wx, iy - wy, iw, ih, AllPlanes, ZPixmap );
++        if (img)
++        {
++            XPutImage( gdi_display, dst, gc, img, 0, 0, ix - x, iy - y, iw, ih );
++            XDestroyImage( img );
++        }
++
++        /* child windows are drawn on top of their parent */
++        capture_window_tree( children[i], x, y, width, height, dst, gc, depth );
++    }
++
++    if (children) XFree( children );
++}
++
++/***********************************************************************
++ *           capture_root_window
++ *
++ * Read (x,y)-(x+width,y+height) from the root window.  On a plain X server
++ * that is simply XGetImage, but when a compositing manager is running the
++ * root window holds no pixels at all and a plain read comes back entirely
++ * black.  In that case compose the visible window tree ourselves.
++ */
++static XImage *capture_root_window( int x, int y, int width, int height, unsigned int depth )
++{
++    XImage *root_img, *image;
++    Pixmap pixmap;
++    GC gc;
++    int empty = 1, i;
++
++    X11DRV_expect_error( gdi_display, XGetImage_handler, NULL );
++    root_img = XGetImage( gdi_display, root_window, x, y, width, height, AllPlanes, ZPixmap );
++    if (X11DRV_check_error() && root_img)
++    {
++        XDestroyImage( root_img );
++        root_img = NULL;
++    }
++
++    if (root_img)
++    {
++        /* YMMCAP_ROOT: is there any non-black pixel in the root window? */
++        const unsigned char *data = (const unsigned char *)root_img->data;
++        size_t size = (size_t)root_img->bytes_per_line * height;
++
++        for (i = 0; i < size; i++) if (data[i]) { empty = 0; break; }
++        if (!empty) return root_img;
++        XDestroyImage( root_img );
++    }
++
++    pixmap = XCreatePixmap( gdi_display, root_window, width, height, depth );
++    if (!pixmap) return NULL;
++    gc = XCreateGC( gdi_display, pixmap, 0, NULL );
++    XSetGraphicsExposures( gdi_display, gc, False );
++    XSetForeground( gdi_display, gc, 0 );
++    XFillRectangle( gdi_display, pixmap, gc, 0, 0, width, height );
++    capture_window_tree( root_window, x, y, width, height, pixmap, gc, depth );
++
++    image = XGetImage( gdi_display, pixmap, 0, 0, width, height, AllPlanes, ZPixmap );
++    XFreeGC( gdi_display, gc );
++    XFreePixmap( gdi_display, pixmap );
++    return image;
++}
++
+ /***********************************************************************
+  *           X11DRV_GetImage
+  */
+@@ -1367,11 +1467,14 @@ DWORD X11DRV_GetImage( PHYSDEV dev, BITMAPINFO *info,
+     src->y -= y;
+     OffsetRect( &src->visrect, -x, -y );
+ 
+-    X11DRV_expect_error( gdi_display, XGetImage_handler, NULL );
+-    image = XGetImage( gdi_display, physdev->drawable,
+-                       physdev->dc_rect.left + x, physdev->dc_rect.top + y,
+-                       width, height, AllPlanes, ZPixmap );
+-    if (X11DRV_check_error())
++    if (physdev->drawable == root_window)
++        image = capture_root_window( physdev->dc_rect.left + x, physdev->dc_rect.top + y,
++                                     width, height, vis.depth );
++    else
++        image = XGetImage( gdi_display, physdev->drawable,
++                           physdev->dc_rect.left + x, physdev->dc_rect.top + y,
++                           width, height, AllPlanes, ZPixmap );
++    if (!image && physdev->drawable != root_window)
+     {
+         /* use a temporary pixmap to avoid the BadMatch error */
+         Pixmap pixmap = XCreatePixmap( gdi_display, root_window, width, height, vis.depth );
