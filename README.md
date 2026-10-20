@@ -46,6 +46,16 @@ Wine の `d2d1.dll` に不足していた Direct2D のコマンドリスト／�
 載せる形で修正済み（統合パッチに反映）。詳細と実測値は
 [docs/effect-transform-replay.md](docs/effect-transform-replay.md)。
 
+**2026-10-20 追記（プレビューのクリック選択／選択枠）**: Wine の `d2d1` は
+`ID2D1CommandList` に対して `GetImageLocalBounds()` が空矩形を返しており、YMM4 が
+その戻り値から作る当たり判定クアッドが縮退して**プレビューのアイテムをクリックで選択できなかった**。
+コマンドリスト記録時に描画範囲を累積し、`DrawImage()` に渡されるエフェクト出力は
+効果行列（2DAffineTransform / 3DTransform）を畳み込んで bounds を求める形で修正
+（`command_list.c` に `d2d_command_list_union_*` / `d2d_command_list_image_bounds()` を追加、
+`device.c` の `GetImageLocalBounds()` が記録済み bounds を返す）。これでクリック選択・
+選択枠・ドラッグ追従・複数アイテムの判別まで実測で動作する。詳細と実測値は
+[docs/preview-hit-test-bounds.md](docs/preview-hit-test-bounds.md)。
+
 ### `patches/winex11/` — Wine 本体（dlls/winex11.drv/）に適用
 
 - `winex11-attach-v3-11.20.patch` — **wine 11.20 向け（推奨）**。`init.c` / `window.c` / `x11drv.h` の 3 ファイル。
@@ -189,6 +199,14 @@ Wine 本体に由来するパッチのため **LGPL-2.1-or-later**（`LICENSE` /
 
 ## 更新履歴
 
+- **2026-10-20**: プレビューのアイテムがクリックで選択できない／選択枠がアイテムに追従しない件を修正 —
+  Wine の `GetImageLocalBounds()` が `ID2D1CommandList` に空矩形を返すため当たり判定クアッドが縮退していた。
+  コマンドリスト記録時に描画範囲を累積（`fill_rectangle` / `draw_rectangle` / `draw_bitmap` /
+  `draw_image` / `fill_geometry` の記録時フック + `record_transform` 適用）し、エフェクト出力は
+  入力へ再帰した上で効果行列を畳み込んで bounds を算出。`device.c` の `GetImageLocalBounds()` は
+  記録済み bounds をそのまま返す。`patches/d2d1/wine-11.20-d2d1-ymm4-complete.patch` を再生成済み。
+  実測: X=300 のアイテムに枠が一致、ドラッグ中も追従、2アイテムの判別成功。
+  詳細: [docs/preview-hit-test-bounds.md](docs/preview-hit-test-bounds.md)
 - **2026-10-19**: アイテムの X / Y / 拡大率がプレビュー・書き出しに反映されない件を修正 —
   `d2d_command_sink_SetTransform()` がコマンドリストの記録変換で CTM を上書きし、効果行列
   （2DAffineTransform / 3DTransform）の平行移動が失われていた。効果行列をリプレイ合成にも

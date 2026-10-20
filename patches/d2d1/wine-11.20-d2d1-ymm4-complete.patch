@@ -43,10 +43,133 @@ index c6ab60c..f475328 100644
  
      if (!(bitmap->options & D2D1_BITMAP_OPTIONS_CANNOT_DRAW))
 diff --git a/dlls/d2d1/command_list.c b/dlls/d2d1/command_list.c
-index 6c830d2..6950068 100644
+index 6c830d2..59eaa76 100644
 --- a/dlls/d2d1/command_list.c
 +++ b/dlls/d2d1/command_list.c
-@@ -292,7 +292,8 @@ static HRESULT STDMETHODCALLTYPE d2d_command_list_Stream(ID2D1CommandList *iface
+@@ -224,6 +224,122 @@ static inline struct d2d_command_list *impl_from_ID2D1CommandList(ID2D1CommandLi
+     return CONTAINING_RECORD(iface, struct d2d_command_list, ID2D1CommandList_iface);
+ }
+ 
++/* YMM4 fix: record the bounding box of everything drawn into a command list. */
++static void d2d_command_list_union_point(struct d2d_command_list *command_list, float x, float y)
++{
++    D2D1_MATRIX_3X2_F t = command_list->record_transform;
++    float tx = x * t._11 + y * t._21 + t._31;
++    float ty = x * t._12 + y * t._22 + t._32;
++
++    if (!command_list->bounds_valid)
++    {
++        command_list->bounds.left = command_list->bounds.right = tx;
++        command_list->bounds.top = command_list->bounds.bottom = ty;
++        command_list->bounds_valid = 1;
++        return;
++    }
++
++    if (tx < command_list->bounds.left) command_list->bounds.left = tx;
++    if (tx > command_list->bounds.right) command_list->bounds.right = tx;
++    if (ty < command_list->bounds.top) command_list->bounds.top = ty;
++    if (ty > command_list->bounds.bottom) command_list->bounds.bottom = ty;
++}
++
++static void d2d_command_list_union_rect(struct d2d_command_list *command_list, const D2D1_RECT_F *rect)
++{
++    if (!rect) return;
++    d2d_command_list_union_point(command_list, rect->left, rect->top);
++    d2d_command_list_union_point(command_list, rect->right, rect->top);
++    d2d_command_list_union_point(command_list, rect->right, rect->bottom);
++    d2d_command_list_union_point(command_list, rect->left, rect->bottom);
++}
++
++/* YMM4 fix: best effort size of an arbitrary image (bitmap / command list /
++ * effect chain).  Used to accumulate the bounds of recorded command lists. */
++/* YMM4 fix: compute the local bounds of an image the same way
++ * ID2D1DeviceContext::GetImageLocalBounds() does, so that recorded command list
++ * bounds match what is really drawn.  For an effect output we recurse to input 0
++ * and then fold the effect transform matrix, which is where YMM4 keeps an item's
++ * position; using the plain bitmap size loses that offset and made the preview
++ * hit-test quad (and the selection frame) ignore item movement. */
++static BOOL d2d_command_list_image_bounds(ID2D1Image *image, D2D1_RECT_F *bounds, unsigned int depth)
++{
++    ID2D1Bitmap *bitmap;
++    ID2D1CommandList *command_list;
++    ID2D1Effect *effect;
++    ID2D1Image *input = NULL;
++    D2D_SIZE_F size;
++    BOOL valid = FALSE;
++
++    if (!image || !depth) return FALSE;
++
++    if (SUCCEEDED(ID2D1Image_QueryInterface(image, &IID_ID2D1Bitmap, (void **)&bitmap)))
++    {
++        size = ID2D1Bitmap_GetSize(bitmap);
++        ID2D1Bitmap_Release(bitmap);
++        if (size.width <= 0.0f || size.height <= 0.0f) return FALSE;
++        bounds->left = 0.0f;
++        bounds->top = 0.0f;
++        bounds->right = size.width;
++        bounds->bottom = size.height;
++        return TRUE;
++    }
++
++    if (SUCCEEDED(ID2D1Image_QueryInterface(image, &IID_ID2D1CommandList, (void **)&command_list)))
++    {
++        struct d2d_command_list *command_list_impl = unsafe_impl_from_ID2D1CommandList(command_list);
++        if (command_list_impl && command_list_impl->bounds_valid)
++        {
++            *bounds = command_list_impl->bounds;
++            valid = TRUE;
++        }
++        ID2D1CommandList_Release(command_list);
++        return valid;
++    }
++
++    if (SUCCEEDED(ID2D1Image_QueryInterface(image, &IID_ID2D1Effect, (void **)&effect)))
++    {
++        ID2D1Effect_GetInput(effect, 0, &input);
++        if (input)
++        {
++            valid = d2d_command_list_image_bounds(input, bounds, depth - 1);
++            if (valid) d2d_effect_apply_matrix_to_bounds(effect, bounds);
++            ID2D1Image_Release(input);
++        }
++        ID2D1Effect_Release(effect);
++        return valid;
++    }
++
++    return FALSE;
++}
++
++static void d2d_command_list_union_image(struct d2d_command_list *command_list, ID2D1Image *image,
++        const D2D1_POINT_2F *offset)
++{
++    D2D1_RECT_F rect;
++    float ox = offset ? offset->x : 0.0f;
++    float oy = offset ? offset->y : 0.0f;
++
++    if (!image) return;
++
++    if (!d2d_command_list_image_bounds(image, &rect, 8))
++    {
++        if (getenv("YMM4DIAG")) fprintf(stderr, "YMM4DIAG: union_image SKIP img=%p off=(%.1f,%.1f) unknown-type\n",
++                (void *)image, ox, oy);
++        return;
++    }
++
++    rect.left += ox;
++    rect.right += ox;
++    rect.top += oy;
++    rect.bottom += oy;
++
++    if (getenv("YMM4DIAG")) fprintf(stderr, "YMM4DIAG: union_image img=%p off=(%.1f,%.1f) -> (%g,%g)-(%g,%g)\n",
++            (void *)image, ox, oy, rect.left, rect.top, rect.right, rect.bottom);
++
++    d2d_command_list_union_rect(command_list, &rect);
++}
++
+ static HRESULT STDMETHODCALLTYPE d2d_command_list_QueryInterface(ID2D1CommandList *iface, REFIID iid, void **out)
+ {
+     TRACE("iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
+@@ -292,7 +408,8 @@ static HRESULT STDMETHODCALLTYPE d2d_command_list_Stream(ID2D1CommandList *iface
  
      TRACE("iface %p, sink %p.\n", iface, sink);
  
@@ -56,7 +179,7 @@ index 6c830d2..6950068 100644
  
      if (FAILED(hr = ID2D1CommandSink_BeginDraw(sink)))
          return hr;
-@@ -303,6 +304,8 @@ static HRESULT STDMETHODCALLTYPE d2d_command_list_Stream(ID2D1CommandList *iface
+@@ -303,6 +420,8 @@ static HRESULT STDMETHODCALLTYPE d2d_command_list_Stream(ID2D1CommandList *iface
      {
          const struct d2d_command *command = data;
  
@@ -65,7 +188,7 @@ index 6c830d2..6950068 100644
          switch (command->op)
          {
              case D2D_COMMAND_SET_ANTIALIAS_MODE:
-@@ -505,10 +508,15 @@ static HRESULT STDMETHODCALLTYPE d2d_command_list_Close(ID2D1CommandList *iface)
+@@ -505,10 +624,15 @@ static HRESULT STDMETHODCALLTYPE d2d_command_list_Close(ID2D1CommandList *iface)
      FIXME("iface %p stub.\n", iface);
  
      if (command_list->state != D2D_COMMAND_LIST_STATE_OPEN)
@@ -81,7 +204,24 @@ index 6c830d2..6950068 100644
      /* FIXME: reset as a target */
  
      return S_OK;
-@@ -727,8 +735,18 @@ void d2d_command_list_begin_draw(struct d2d_command_list *command_list,
+@@ -531,6 +655,8 @@ HRESULT d2d_command_list_create(ID2D1Factory *factory, struct d2d_command_list *
+ 
+     (*command_list)->ID2D1CommandList_iface.lpVtbl = &d2d_command_list_vtbl;
+     (*command_list)->refcount = 1;
++    (*command_list)->record_transform._11 = 1.0f;
++    (*command_list)->record_transform._22 = 1.0f;
+     ID2D1Factory_AddRef((*command_list)->factory = factory);
+ 
+     TRACE("Created command list %p.\n", *command_list);
+@@ -719,6 +845,7 @@ void d2d_command_list_set_transform(struct d2d_command_list *command_list,
+     {
+         command->c.op = D2D_COMMAND_SET_TRANSFORM;
+         command->transform = *transform;
++        command_list->record_transform = *transform;
+     }
+ }
+ 
+@@ -727,8 +854,19 @@ void d2d_command_list_begin_draw(struct d2d_command_list *command_list,
  {
      if (command_list->state != D2D_COMMAND_LIST_STATE_INITIAL)
      {
@@ -94,6 +234,7 @@ index 6c830d2..6950068 100644
 +        while (command_list->objects_count)
 +            IUnknown_Release(command_list->objects[--command_list->objects_count]);
 +        command_list->size = 0;
++        command_list->bounds_valid = 0;
 +        command_list->state = D2D_COMMAND_LIST_STATE_INITIAL;
 +    }
 +    else
@@ -102,8 +243,76 @@ index 6c830d2..6950068 100644
      }
  
      d2d_command_list_set_antialias_mode(command_list, context->drawing_state.antialiasMode);
+@@ -869,6 +1007,15 @@ void d2d_command_list_draw_rectangle(struct d2d_command_list *command_list, cons
+         command->brush = brush;
+         command->stroke_width = stroke_width;
+         command->stroke_style = stroke_style;
++        {
++            D2D1_RECT_F grown = *rect;
++            float half = stroke_width * 0.5f;
++            grown.left -= half;
++            grown.top -= half;
++            grown.right += half;
++            grown.bottom += half;
++            d2d_command_list_union_rect(command_list, &grown);
++        }
+     }
+ }
+ 
+@@ -896,6 +1043,11 @@ void d2d_command_list_fill_geometry(struct d2d_command_list *command_list,
+         command->geometry = geometry;
+         command->brush = brush;
+         command->opacity_brush = opacity_brush;
++        {
++            D2D1_RECT_F gb;
++            if (SUCCEEDED(ID2D1Geometry_GetBounds(geometry, NULL, &gb)))
++                d2d_command_list_union_rect(command_list, &gb);
++        }
+     }
+ }
+ 
+@@ -913,6 +1065,7 @@ void d2d_command_list_fill_rectangle(struct d2d_command_list *command_list,
+         command->c.op = D2D_COMMAND_FILL_RECTANGLE;
+         command->rect = *rect;
+         command->brush = brush;
++        d2d_command_list_union_rect(command_list, rect);
+     }
+ }
+ 
+@@ -1072,6 +1225,19 @@ void d2d_command_list_draw_bitmap(struct d2d_command_list *command_list, ID2D1Bi
+ 
+         d2d_command_list_write_field(&data, &command->dst_rect, dst_rect, sizeof(*dst_rect));
+         d2d_command_list_write_field(&data, &command->src_rect, src_rect, sizeof(*src_rect));
++
++        if (dst_rect)
++        {
++            d2d_command_list_union_rect(command_list, dst_rect);
++        }
++        else if (bitmap)
++        {
++            D2D1_RECT_F unit = {0.0f, 0.0f, 0.0f, 0.0f};
++            D2D1_SIZE_F bsize = ID2D1Bitmap_GetSize(bitmap);
++            unit.right = bsize.width;
++            unit.bottom = bsize.height;
++            d2d_command_list_union_rect(command_list, &unit);
++        }
+         d2d_command_list_write_field(&data, &command->perspective_transform, perspective_transform,
+                 sizeof(*perspective_transform));
+     }
+@@ -1102,6 +1268,11 @@ void d2d_command_list_draw_image(struct d2d_command_list *command_list, ID2D1Ima
+ 
+         d2d_command_list_write_field(&data, &command->target_offset, target_offset, sizeof(*target_offset));
+         d2d_command_list_write_field(&data, &command->image_rect, image_rect, sizeof(*image_rect));
++
++        if (image_rect)
++            d2d_command_list_union_rect(command_list, image_rect);
++        else
++            d2d_command_list_union_image(command_list, image, target_offset);
+     }
+ }
+ 
 diff --git a/dlls/d2d1/d2d1_private.h b/dlls/d2d1/d2d1_private.h
-index ba6cea7..7a52954 100644
+index ba6cea7..304db8d 100644
 --- a/dlls/d2d1/d2d1_private.h
 +++ b/dlls/d2d1/d2d1_private.h
 @@ -219,6 +219,14 @@ struct d2d_device_context
@@ -129,19 +338,41 @@ index ba6cea7..7a52954 100644
      struct d2d_effect_properties properties;
      struct d2d_effect_context *effect_context;
      struct d2d_transform_graph *graph;
+@@ -911,8 +920,18 @@ struct d2d_command_list
+     size_t objects_count;
+     size_t objects_capacity;
+     IUnknown **objects;
++
++    /* YMM4 fix: accumulate a local bounding box while recording so that
++     * ID2D1DeviceContext::GetImageLocalBounds() reports real content bounds
++     * instead of empty bounds.  The app uses those bounds for preview hit
++     * testing, so an empty box makes items unselectable. */
++    D2D1_RECT_F bounds;
++    unsigned int bounds_valid;
++    D2D1_MATRIX_3X2_F record_transform;
+ };
+ 
++void d2d_effect_apply_matrix_to_bounds(ID2D1Effect *effect, D2D1_RECT_F *bounds);
++
+ HRESULT d2d_command_list_create(ID2D1Factory *factory, struct d2d_command_list **command_list);
+ struct d2d_command_list *unsafe_impl_from_ID2D1CommandList(ID2D1CommandList *iface);
+ void d2d_command_list_begin_draw(struct d2d_command_list *command_list, const struct d2d_device_context *context);
 diff --git a/dlls/d2d1/device.c b/dlls/d2d1/device.c
-index 552d6d4..eadd63f 100644
+index 552d6d4..ef7d617 100644
 --- a/dlls/d2d1/device.c
 +++ b/dlls/d2d1/device.c
-@@ -18,6 +18,7 @@
+@@ -18,6 +18,10 @@
  
  #include "d2d1_private.h"
  #include <d3dcompiler.h>
 +#include <stdio.h>
++
++/* YMM4 diagnosis: enable with YMM4DIAG=1 in the environment. */
++#define YMM4DIAG (getenv("YMM4DIAG") != NULL)
  
  WINE_DEFAULT_DEBUG_CHANNEL(d2d);
  
-@@ -171,6 +172,17 @@ static void d2d_device_context_draw(struct d2d_device_context *render_target, en
+@@ -171,6 +175,17 @@ static void d2d_device_context_draw(struct d2d_device_context *render_target, en
      }
      ID3D11DeviceContext1_RSSetScissorRects(context, 1, &scissor_rect);
      ID3D11DeviceContext1_RSSetState(context, render_target->rs);
@@ -159,7 +390,25 @@ index 552d6d4..eadd63f 100644
      ID3D11DeviceContext1_OMSetRenderTargets(context, 1, &render_target->target.bitmap->rtv, NULL);
      if (brush)
      {
-@@ -1240,7 +1252,19 @@ static void d2d_device_context_draw_bitmap(struct d2d_device_context *context, I
+@@ -589,6 +604,8 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawLine(ID2D1DeviceContext6 *i
+ 
+     if (FAILED(context->error.code))
+         return;
++    if (YMM4DIAG) fprintf(stderr, "YMM4DIAG: REC DrawLine (%.1f,%.1f)-(%.1f,%.1f) sw=%.1f ttype=%d\n",
++            p0.x, p0.y, p1.x, p1.y, stroke_width, context->target.type);
+ 
+     if (context->target.type == D2D_TARGET_COMMAND_LIST)
+     {
+@@ -632,6 +649,8 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawRectangle(ID2D1DeviceContex
+ 
+     if (FAILED(context->error.code))
+         return;
++    if (YMM4DIAG) fprintf(stderr, "YMM4DIAG: REC DrawRectangle (%.1f,%.1f)-(%.1f,%.1f) sw=%.1f ttype=%d\n",
++            rect->left, rect->top, rect->right, rect->bottom, stroke_width, context->target.type);
+ 
+     if (context->target.type == D2D_TARGET_COMMAND_LIST)
+     {
+@@ -1240,7 +1259,19 @@ static void d2d_device_context_draw_bitmap(struct d2d_device_context *context, I
          return;
      }
  
@@ -168,7 +417,7 @@ index 552d6d4..eadd63f 100644
 +        if (context->target.bitmap && context->target.bitmap->resource)
 +            ID3D11Resource_GetDevice(context->target.bitmap->resource, &tgtdev);
 +        ctxdev2 = (ID3D11Device *)context->d3d_device;
-+        if (0) fprintf(stderr, "YMM4DIAG: DBfill pre err=%#lx brush=%p d=(%.0f,%.0f,%.0f,%.0f) s=(%.0f,%.0f,%.0f,%.0f) tgt=%p rtv=%p ttype=%d tgtdev=%p ctxdev=%p\n",
++        if (YMM4DIAG) fprintf(stderr, "YMM4DIAG: DBfill pre err=%#lx brush=%p d=(%.0f,%.0f,%.0f,%.0f) s=(%.0f,%.0f,%.0f,%.0f) tgt=%p rtv=%p ttype=%d tgtdev=%p ctxdev=%p\n",
 +                (unsigned long)context->error.code, (void *)brush, d.left, d.top, d.right, d.bottom, s.left, s.top, s.right, s.bottom,
 +                (void *)context->target.bitmap, context->target.bitmap ? (void *)context->target.bitmap->rtv : NULL, context->target.type,
 +                (void *)tgtdev, (void *)ctxdev2); fflush(stderr);
@@ -179,13 +428,13 @@ index 552d6d4..eadd63f 100644
      ID2D1Brush_Release(&brush->ID2D1Brush_iface);
  }
  
-@@ -1252,6 +1276,13 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawBitmap(ID2D1DeviceContext6
+@@ -1252,6 +1283,13 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawBitmap(ID2D1DeviceContext6
  
      TRACE("iface %p, bitmap %p, dst_rect %s, opacity %.8e, interpolation_mode %#x, src_rect %s.\n",
              iface, bitmap, debug_d2d_rect_f(dst_rect), opacity, interpolation_mode, debug_d2d_rect_f(src_rect));
 +    {
 +        D2D1_MATRIX_3X2_F ct = impl_from_ID2D1DeviceContext(iface)->drawing_state.transform;
-+        if (0) fprintf(stderr, "YMM4DIAG: DrawBitmap dst=(%.0f,%.0f,%.0f,%.0f) src=%s ctxT=(%.1f,%.1f,%.1f,%.1f,%.1f,%.1f) tgt_type=%d\n",
++        if (YMM4DIAG) fprintf(stderr, "YMM4DIAG: DrawBitmap dst=(%.0f,%.0f,%.0f,%.0f) src=%s ctxT=(%.1f,%.1f,%.1f,%.1f,%.1f,%.1f) tgt_type=%d\n",
 +                dst_rect?dst_rect->left:0, dst_rect?dst_rect->top:0, dst_rect?dst_rect->right:0, dst_rect?dst_rect->bottom:0,
 +                src_rect?"Y":"N", ct._11, ct._12, ct._21, ct._22, ct._31, ct._32,
 +                impl_from_ID2D1DeviceContext(iface)->target.type); fflush(stderr);
@@ -193,22 +442,22 @@ index 552d6d4..eadd63f 100644
  
      if (FAILED(context->error.code))
          return;
-@@ -1719,6 +1750,10 @@ static void STDMETHODCALLTYPE d2d_device_context_SetTransform(ID2D1DeviceContext
+@@ -1719,6 +1757,10 @@ static void STDMETHODCALLTYPE d2d_device_context_SetTransform(ID2D1DeviceContext
  
      TRACE("iface %p, transform %p.\n", iface, transform);
  
-+    if (0) fprintf(stderr, "YMM4DIAG: SetTransform (%.2f,%.2f,%.2f,%.2f,%.2f,%.2f) target_type=%d\n",
++    if (YMM4DIAG) fprintf(stderr, "YMM4DIAG: SetTransform (%.2f,%.2f,%.2f,%.2f,%.2f,%.2f) target_type=%d\n",
 +            transform->_11, transform->_12, transform->_21, transform->_22, transform->_31, transform->_32,
 +            context->target.type); fflush(stderr);
 +
      if (context->target.type == D2D_TARGET_COMMAND_LIST)
          d2d_command_list_set_transform(context->target.command_list, transform);
  
-@@ -1927,6 +1962,11 @@ static void STDMETHODCALLTYPE d2d_device_context_PushAxisAlignedClip(ID2D1Device
+@@ -1927,6 +1969,11 @@ static void STDMETHODCALLTYPE d2d_device_context_PushAxisAlignedClip(ID2D1Device
  
      TRACE("iface %p, clip_rect %s, antialias_mode %#x.\n", iface, debug_d2d_rect_f(clip_rect), antialias_mode);
  
-+    if (0) fprintf(stderr, "YMM4DIAG: PushClip (%.0f,%.0f,%.0f,%.0f) clips_before=%u ttype=%d\n",
++    if (YMM4DIAG) fprintf(stderr, "YMM4DIAG: PushClip (%.0f,%.0f,%.0f,%.0f) clips_before=%u ttype=%d\n",
 +            clip_rect->left, clip_rect->top, clip_rect->right, clip_rect->bottom,
 +            context->clip_stack.count, context->target.type);
 +    fflush(stderr);
@@ -216,17 +465,17 @@ index 552d6d4..eadd63f 100644
      if (context->target.type == D2D_TARGET_COMMAND_LIST)
          d2d_command_list_push_clip(context->target.command_list, clip_rect, antialias_mode);
  
-@@ -1958,6 +1998,9 @@ static void STDMETHODCALLTYPE d2d_device_context_PopAxisAlignedClip(ID2D1DeviceC
+@@ -1958,6 +2005,9 @@ static void STDMETHODCALLTYPE d2d_device_context_PopAxisAlignedClip(ID2D1DeviceC
  
      TRACE("iface %p.\n", iface);
  
-+    if (0) fprintf(stderr, "YMM4DIAG: PopClip clips_before=%u ttype=%d\n", context->clip_stack.count, context->target.type);
++    if (YMM4DIAG) fprintf(stderr, "YMM4DIAG: PopClip clips_before=%u ttype=%d\n", context->clip_stack.count, context->target.type);
 +    fflush(stderr);
 +
      if (context->target.type == D2D_TARGET_COMMAND_LIST)
          d2d_command_list_pop_clip(context->target.command_list);
  
-@@ -1987,9 +2030,16 @@ static void STDMETHODCALLTYPE d2d_device_context_Clear(ID2D1DeviceContext6 *ifac
+@@ -1987,9 +2037,16 @@ static void STDMETHODCALLTYPE d2d_device_context_Clear(ID2D1DeviceContext6 *ifac
  
      if (context->target.type == D2D_TARGET_COMMAND_LIST)
      {
@@ -244,7 +493,7 @@ index 552d6d4..eadd63f 100644
  
      ID3D11Device1_GetImmediateContext(context->d3d_device, &d3d_context);
  
-@@ -2059,6 +2109,8 @@ static void STDMETHODCALLTYPE d2d_device_context_BeginDraw(ID2D1DeviceContext6 *
+@@ -2059,6 +2116,8 @@ static void STDMETHODCALLTYPE d2d_device_context_BeginDraw(ID2D1DeviceContext6 *
      if (context->target.type == D2D_TARGET_COMMAND_LIST)
          d2d_command_list_begin_draw(context->target.command_list, context);
  
@@ -253,7 +502,7 @@ index 552d6d4..eadd63f 100644
      memset(&context->error, 0, sizeof(context->error));
  }
  
-@@ -2072,15 +2124,114 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_EndDraw(ID2D1DeviceContext6
+@@ -2072,15 +2131,114 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_EndDraw(ID2D1DeviceContext6
  
      if (context->target.type == D2D_TARGET_COMMAND_LIST)
      {
@@ -370,7 +619,7 @@ index 552d6d4..eadd63f 100644
      if (context->ops && context->ops->device_context_present)
      {
          if (FAILED(hr = context->ops->device_context_present(context->outer_unknown)))
-@@ -2274,6 +2425,14 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_CreateBitmapFromDxgiSurface(
+@@ -2274,6 +2432,14 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_CreateBitmapFromDxgiSurface(
      HRESULT hr;
  
      TRACE("iface %p, surface %p, desc %p, bitmap %p.\n", iface, surface, desc, bitmap);
@@ -385,7 +634,7 @@ index 552d6d4..eadd63f 100644
  
      surface_options = d2d_get_bitmap_options_for_surface(surface);
  
-@@ -2304,7 +2463,10 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_CreateBitmapFromDxgiSurface(
+@@ -2304,7 +2470,10 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_CreateBitmapFromDxgiSurface(
      }
  
      if (SUCCEEDED(hr = d2d_bitmap_create_shared(context, &IID_IDXGISurface, surface, desc, &object)))
@@ -396,20 +645,89 @@ index 552d6d4..eadd63f 100644
  
      return hr;
  }
-@@ -2316,7 +2478,11 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_CreateEffect(ID2D1DeviceCont
+@@ -2316,7 +2485,11 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_CreateEffect(ID2D1DeviceCont
  
      TRACE("iface %p, effect_id %s, effect %p.\n", iface, debugstr_guid(effect_id), effect);
  
 -    return d2d_effect_create(context, effect_id, effect);
 +    {
 +        HRESULT hr2 = d2d_effect_create(context, effect_id, effect);
-+        if (0) fprintf(stderr, "YMM4DIAG: CreateEffect %s hr=%#lx\n", debugstr_guid(effect_id), (unsigned long)hr2); fflush(stderr);
++        if (YMM4DIAG) fprintf(stderr, "YMM4DIAG: CreateEffect %s hr=%#lx\n", debugstr_guid(effect_id), (unsigned long)hr2); fflush(stderr);
 +        return hr2;
 +    }
  }
  
  static HRESULT STDMETHODCALLTYPE d2d_device_context_ID2D1DeviceContext_CreateGradientStopCollection(
-@@ -2426,7 +2592,10 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_GetImageLocalBounds(ID2D1Dev
+@@ -2420,15 +2593,82 @@ static BOOL STDMETHODCALLTYPE d2d_device_context_IsBufferPrecisionSupported(ID2D
+     return !!(support & D3D11_FORMAT_SUPPORT_BUFFER);
+ }
+ 
++/* YMM4 fix: real Direct2D reports the bounds of an effect output in the
++ * effect's own space, i.e. the transforms applied by the effect chain are
++ * already folded into the result.  Our stub effects are pass-through, so the
++ * bounds of the input are returned unchanged and the application - which uses
++ * these bounds to build its preview hit-test quads - ends up with a rectangle
++ * that is not translated/scaled by the item transform.  Fold the transform of
++ * the common transform effects into the returned bounds. */
++void d2d_effect_apply_matrix_to_bounds(ID2D1Effect *effect, D2D1_RECT_F *bounds)
++{
++    static const CLSID clsid_2daffine = {0x6aa97485,0x6354,0x4cfc,{0x90,0x8c,0xe4,0xa7,0x4f,0x62,0xc9,0x6c}};
++    static const CLSID clsid_3dtransform = {0xe8467b04,0xec61,0x4b8a,{0xb5,0xde,0xd4,0xd7,0x3d,0xeb,0xea,0x5a}};
++    D2D1_MATRIX_3X2_F m;
++    D2D1_MATRIX_4X4_F m4;
++    GUID id;
++    float xs[4], ys[4];
++    int i;
++
++    memset(&id, 0, sizeof(id));
++    if (FAILED(ID2D1Effect_GetValue(effect, D2D1_PROPERTY_CLSID, D2D1_PROPERTY_TYPE_CLSID, (BYTE *)&id, sizeof(id))))
++        return;
++
++    memset(&m, 0, sizeof(m));
++    m._11 = m._22 = 1.0f;
++    if (IsEqualGUID(&id, &clsid_2daffine))
++    {
++        if (FAILED(ID2D1Effect_GetValue(effect, 2 /* TRANSFORM_MATRIX */, D2D1_PROPERTY_TYPE_MATRIX_3X2,
++                (BYTE *)&m, sizeof(m))))
++            return;
++    }
++    else if (IsEqualGUID(&id, &clsid_3dtransform))
++    {
++        memset(&m4, 0, sizeof(m4));
++        if (FAILED(ID2D1Effect_GetValue(effect, 2 /* TRANSFORM_MATRIX */, D2D1_PROPERTY_TYPE_MATRIX_4X4,
++                (BYTE *)&m4, sizeof(m4))))
++            return;
++        m._11 = m4._11; m._12 = m4._12; m._21 = m4._21; m._22 = m4._22;
++        m._31 = m4._41; m._32 = m4._42;
++    }
++    else
++    {
++        return;
++    }
++
++    xs[0] = m._11 * bounds->left  + m._21 * bounds->top    + m._31;
++    ys[0] = m._12 * bounds->left  + m._22 * bounds->top    + m._32;
++    xs[1] = m._11 * bounds->right + m._21 * bounds->top    + m._31;
++    ys[1] = m._12 * bounds->right + m._22 * bounds->top    + m._32;
++    xs[2] = m._11 * bounds->right + m._21 * bounds->bottom + m._31;
++    ys[2] = m._12 * bounds->right + m._22 * bounds->bottom + m._32;
++    xs[3] = m._11 * bounds->left  + m._21 * bounds->bottom + m._31;
++    ys[3] = m._12 * bounds->left  + m._22 * bounds->bottom + m._32;
++
++    bounds->left = bounds->right = xs[0];
++    bounds->top = bounds->bottom = ys[0];
++    for (i = 1; i < 4; ++i)
++    {
++        if (xs[i] < bounds->left) bounds->left = xs[i];
++        if (xs[i] > bounds->right) bounds->right = xs[i];
++        if (ys[i] < bounds->top) bounds->top = ys[i];
++        if (ys[i] > bounds->bottom) bounds->bottom = ys[i];
++    }
++}
++
+ static HRESULT STDMETHODCALLTYPE d2d_device_context_GetImageLocalBounds(ID2D1DeviceContext6 *iface,
+         ID2D1Image *image, D2D1_RECT_F *local_bounds)
+ {
      struct d2d_device_context *context = impl_from_ID2D1DeviceContext(iface);
      D2D_SIZE_U pixel_size;
      ID2D1Bitmap *bitmap;
@@ -419,8 +737,17 @@ index 552d6d4..eadd63f 100644
 +    HRESULT hr;
  
      TRACE("iface %p, image %p, local_bounds %p.\n", iface, image, local_bounds);
++    if (YMM4DIAG) fprintf(stderr, "YMM4DIAG: GetImageLocalBounds img=%p\n", image);
  
-@@ -2456,20 +2625,75 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_GetImageLocalBounds(ID2D1Dev
+     if (SUCCEEDED(ID2D1Image_QueryInterface(image, &IID_ID2D1Bitmap, (void **)&bitmap)))
+     {
+@@ -2452,24 +2692,124 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_GetImageLocalBounds(ID2D1Dev
+                 WARN("Unknown unit mode %#x.\n", context->drawing_state.unitMode);
+                 break;
+         }
++        if (YMM4DIAG) fprintf(stderr, "YMM4DIAG:   bounds BITMAP (%g,%g)-(%g,%g)\n",
++                local_bounds->left, local_bounds->top, local_bounds->right, local_bounds->bottom);
+         ID2D1Bitmap_Release(bitmap);
  
          return S_OK;
      }
@@ -430,14 +757,24 @@ index 552d6d4..eadd63f 100644
 +         * exact for pass-through effects and a reasonable approximation for
 +         * stub effects which do not render anything yet. */
 +        ID2D1Effect_GetInput(effect, 0, &input);
-+        ID2D1Effect_Release(effect);
 +
 +        if (input)
 +        {
++            if (YMM4DIAG) fprintf(stderr, "YMM4DIAG:   bounds EFFECT->input %p\n", input);
 +            hr = d2d_device_context_GetImageLocalBounds(iface, input, local_bounds);
++            if (SUCCEEDED(hr))
++            {
++                D2D1_RECT_F before = *local_bounds;
++                d2d_effect_apply_matrix_to_bounds(effect, local_bounds);
++                if (YMM4DIAG) fprintf(stderr, "YMM4DIAG:   bounds EFFECT matrix (%g,%g)-(%g,%g) -> (%g,%g)-(%g,%g)\n",
++                        before.left, before.top, before.right, before.bottom,
++                        local_bounds->left, local_bounds->top, local_bounds->right, local_bounds->bottom);
++            }
 +            ID2D1Image_Release(input);
++            ID2D1Effect_Release(effect);
 +            return hr;
 +        }
++        ID2D1Effect_Release(effect);
 +
 +        /* An effect without a connected input has empty bounds. */
 +        local_bounds->left = 0.0f;
@@ -455,12 +792,45 @@ index 552d6d4..eadd63f 100644
 -        return E_NOTIMPL;
 +        if (SUCCEEDED(ID2D1Image_QueryInterface(image, &IID_ID2D1CommandList, (void **)&command_list)))
 +        {
-+            /* Command lists do not carry bounds information; report empty
-+             * bounds, matching the behavior of an empty drawing. */
-+            local_bounds->left = 0.0f;
-+            local_bounds->top = 0.0f;
-+            local_bounds->right = 0.0f;
-+            local_bounds->bottom = 0.0f;
++            /* YMM4 fix: report the accumulated content bounds of the command
++             * list.  Upstream reports empty bounds, which makes every preview
++             * hit test fail (items cannot be selected with the mouse). */
++            struct d2d_command_list *command_list_impl = unsafe_impl_from_ID2D1CommandList(command_list);
++            if (command_list_impl && command_list_impl->bounds_valid)
++            {
++                /* YMM4 fix: report the accumulated content bounds verbatim.
++                 * The recorded bounds already carry the item transform (folded
++                 * through the effect chain), so re-centring them here would
++                 * throw the item position away and the preview selection frame
++                 * could never follow an item. */
++                *local_bounds = command_list_impl->bounds;
++                if (YMM4DIAG) fprintf(stderr, "YMM4DIAG:   bounds COMMANDLIST raw=(%g,%g)-(%g,%g)\n",
++                        local_bounds->left, local_bounds->top, local_bounds->right, local_bounds->bottom);
++            }
++            else
++            {
++                /* YMM4 fix: a command list whose recorded content did not
++                 * contribute any bounds (or was re-opened and reset) must not
++                 * report an empty rectangle, or the application builds a
++                 * degenerate hit-test quad.  Fall back to the render target
++                 * size so that hover/selection keeps working. */
++                D2D1_SIZE_U fallback_size = {0};
++                d2d_device_context_GetPixelSize(&context->ID2D1DeviceContext6_iface, &fallback_size);
++                if (!fallback_size.width || !fallback_size.height)
++                {
++                    fallback_size.width = 1920;
++                    fallback_size.height = 1080;
++                }
++                local_bounds->left = -(float)fallback_size.width / 2.0f;
++                local_bounds->top = -(float)fallback_size.height / 2.0f;
++                local_bounds->right = (float)fallback_size.width / 2.0f;
++                local_bounds->bottom = (float)fallback_size.height / 2.0f;
++                if (YMM4DIAG) fprintf(stderr, "YMM4DIAG:   bounds COMMANDLIST fallback %ux%u\n",
++                        fallback_size.width, fallback_size.height);
++            }
++            if (YMM4DIAG) fprintf(stderr, "YMM4DIAG:   bounds COMMANDLIST cl=%p valid=%u (%g,%g)-(%g,%g)\n",
++                    command_list, command_list_impl ? command_list_impl->bounds_valid : 0, local_bounds->left,
++                    local_bounds->top, local_bounds->right, local_bounds->bottom);
 +
 +            ID2D1CommandList_Release(command_list);
 +
@@ -500,7 +870,7 @@ index 552d6d4..eadd63f 100644
  }
  
  static HRESULT STDMETHODCALLTYPE d2d_device_context_GetGlyphRunWorldBounds(ID2D1DeviceContext6 *iface,
-@@ -2568,6 +2792,26 @@ static void STDMETHODCALLTYPE d2d_device_context_SetTarget(ID2D1DeviceContext6 *
+@@ -2568,6 +2908,26 @@ static void STDMETHODCALLTYPE d2d_device_context_SetTarget(ID2D1DeviceContext6 *
  
      TRACE("iface %p, target %p.\n", iface, target);
  
@@ -513,21 +883,21 @@ index 552d6d4..eadd63f 100644
 +            ID3D11Device *t_resdev = NULL;
 +            if (tmp_impl && tmp_impl->resource)
 +                ID3D11Resource_GetDevice(tmp_impl->resource, &t_resdev);
-+            if (0) fprintf(stderr, "YMM4DIAG: SetTarget %p bitmap %ux%u opts=%#x rtv=%p resdev=%p ctxdev=%p\n", (void *)target, ts.width, ts.height,
++            if (YMM4DIAG) fprintf(stderr, "YMM4DIAG: SetTarget %p bitmap %ux%u opts=%#x rtv=%p resdev=%p ctxdev=%p\n", (void *)target, ts.width, ts.height,
 +                    tmp_impl ? tmp_impl->options : 0, tmp_impl ? (void *)tmp_impl->rtv : NULL,
 +                    (void *)t_resdev, (void *)context->d3d_device);
 +            if (t_resdev) ID3D11Device_Release(t_resdev);
 +            ID2D1Bitmap_Release(tmp_bitmap);
 +        }
 +        else
-+            if (0) fprintf(stderr, "YMM4DIAG: SetTarget %p\n", (void *)target);
++            if (YMM4DIAG) fprintf(stderr, "YMM4DIAG: SetTarget %p\n", (void *)target);
 +        fflush(stderr);
 +    }
 +
      if (!target)
      {
          d2d_device_context_reset_target(context);
-@@ -2713,16 +2957,365 @@ static void STDMETHODCALLTYPE d2d_device_context_ID2D1DeviceContext_DrawGlyphRun
+@@ -2713,16 +3073,374 @@ static void STDMETHODCALLTYPE d2d_device_context_ID2D1DeviceContext_DrawGlyphRun
      d2d_device_context_draw_glyph_run(context, baseline_origin, glyph_run, glyph_run_desc, brush, measuring_mode);
  }
  
@@ -630,6 +1000,9 @@ index 552d6d4..eadd63f 100644
 +{
 +    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
 +
++    if (YMM4DIAG) fprintf(stderr, "YMM4DIAG: (sink)SetTransform in=(%.2f,%.2f,%.2f,%.2f,%.2f,%.2f) replay_valid=%u replay=(%.2f,%.2f)\n",
++            transform->_11, transform->_12, transform->_21, transform->_22, transform->_31, transform->_32,
++            sink->context->replay_offset_valid, sink->context->replay_offset.x, sink->context->replay_offset.y);
 +    if (sink->context->replay_offset_valid)
 +    {
 +        /* YMM4 compatibility: a target offset passed to DrawImage() shifts the
@@ -714,6 +1087,9 @@ index 552d6d4..eadd63f 100644
 +        ID2D1Brush *brush, float stroke_width, ID2D1StrokeStyle *stroke_style)
 +{
 +    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++    if (YMM4DIAG) fprintf(stderr, "YMM4DIAG: (sink)DrawRectangle (%.1f,%.1f)-(%.1f,%.1f) sw=%.1f\n",
++            rect->left, rect->top, rect->right, rect->bottom, stroke_width);
++
 +
 +    ID2D1RenderTarget_DrawRectangle(SINK_RT(sink), rect, brush, stroke_width, stroke_style);
 +    return S_OK;
@@ -779,6 +1155,9 @@ index 552d6d4..eadd63f 100644
 +        ID2D1Brush *brush)
 +{
 +    struct d2d_command_sink *sink = impl_from_ID2D1CommandSink(iface);
++    if (YMM4DIAG) fprintf(stderr, "YMM4DIAG: (sink)FillRectangle (%.1f,%.1f)-(%.1f,%.1f)\n",
++            rect->left, rect->top, rect->right, rect->bottom);
++
 +
 +    ID2D1RenderTarget_FillRectangle(SINK_RT(sink), rect, brush);
 +    return S_OK;
@@ -876,7 +1255,7 @@ index 552d6d4..eadd63f 100644
      TRACE("iface %p, image %p, target_offset %s, image_rect %s, interpolation_mode %#x, composite_mode %#x.\n",
              iface, image, debug_d2d_point_2f(target_offset), debug_d2d_rect_f(image_rect),
              interpolation_mode, composite_mode);
-+    if (0)
++    if (YMM4DIAG)
 +    {
 +        fprintf(stderr, "YMM4DIAG: DrawImage img=%p", (void *)image);
 +        if (!image_rect) fprintf(stderr, " rect=N");
@@ -893,7 +1272,7 @@ index 552d6d4..eadd63f 100644
  
      if (FAILED(context->error.code))
          return;
-@@ -2745,12 +3338,273 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawImage(ID2D1DeviceContext6 *
+@@ -2745,12 +3463,277 @@ static void STDMETHODCALLTYPE d2d_device_context_DrawImage(ID2D1DeviceContext6 *
  
      if (SUCCEEDED(ID2D1Image_QueryInterface(image, &IID_ID2D1Bitmap, (void **)&bitmap)))
      {
@@ -903,7 +1282,7 @@ index 552d6d4..eadd63f 100644
 +        const D2D1_POINT_2F *use_offset = target_offset;
 +        ID2D1Bitmap *target_bitmap = NULL;
  
-+        if (0) fprintf(stderr, "YMM4DIAG:   bitmap %p size %ux%u\n", (void *)bitmap, bsz.width, bsz.height); fflush(stderr);
++        if (YMM4DIAG) fprintf(stderr, "YMM4DIAG:   bitmap %p size %ux%u\n", (void *)bitmap, bsz.width, bsz.height); fflush(stderr);
 +
 +        /* YMM4 composes in a center-origin canvas space. When blitting a leaf
 +         * bitmap onto a real target, add the target center. */
@@ -915,7 +1294,7 @@ index 552d6d4..eadd63f 100644
 +            adj_off.y = target_offset->y + ts.height / 2.0f;
 +            use_offset = &adj_off;
 +            ID2D1Bitmap_Release(target_bitmap);
-+            if (0) fprintf(stderr, "YMM4DIAG:   shifted off=(%.1f,%.1f)\n", adj_off.x, adj_off.y); fflush(stderr);
++            if (YMM4DIAG) fprintf(stderr, "YMM4DIAG:   shifted off=(%.1f,%.1f)\n", adj_off.x, adj_off.y); fflush(stderr);
 +        }
 +
 +#if 0
@@ -1020,6 +1399,10 @@ index 552d6d4..eadd63f 100644
 +                context->replay_offset_valid = 1;
 +                context->replay_offset = *target_offset;
 +            }
++            if (YMM4DIAG) fprintf(stderr, "YMM4DIAG: CL-Stream cl=%p target_offset=%s(%.2f,%.2f) replay_valid=%u replay=(%.2f,%.2f)\n",
++                    command_list, target_offset ? "Y" : "N",
++                    target_offset ? target_offset->x : 0.0f, target_offset ? target_offset->y : 0.0f,
++                    context->replay_offset_valid, context->replay_offset.x, context->replay_offset.y);
 +            context->replay_depth++;
 +            ID2D1CommandList_Stream(command_list, sink);
 +            context->replay_depth--;
@@ -1061,12 +1444,12 @@ index 552d6d4..eadd63f 100644
 +                t._32 += context->target.bitmap->pixel_size.height / 2.0f;
 +                ID2D1RenderTarget_SetTransform(rt, &t);
 +                center_compensated = TRUE;
-+                if (0) fprintf(stderr, "YMM4DIAG: chain center-compensated (%.1f,%.1f)\n", t._31, t._32); fflush(stderr);
++                if (YMM4DIAG) fprintf(stderr, "YMM4DIAG: chain center-compensated (%.1f,%.1f)\n", t._31, t._32); fflush(stderr);
 +            }
 +
 +            memset(&id, 0, sizeof(id));
 +            ID2D1Effect_GetValue(effect, D2D1_PROPERTY_CLSID, D2D1_PROPERTY_TYPE_CLSID, (BYTE *)&id, sizeof(id));
-+            if (0) fprintf(stderr, "YMM4DIAG:   effect %s\n", debugstr_guid(&id)); fflush(stderr);
++            if (YMM4DIAG) fprintf(stderr, "YMM4DIAG:   effect %s\n", debugstr_guid(&id)); fflush(stderr);
 +
 +            if (IsEqualGUID(&id, &clsid_2daffine) || IsEqualGUID(&id, &clsid_3dtransform))
 +            {
@@ -1085,10 +1468,10 @@ index 552d6d4..eadd63f 100644
 +                    ghr = ID2D1Effect_GetValue(effect, 2 /*TRANSFORM_MATRIX*/, D2D1_PROPERTY_TYPE_MATRIX_4X4, (BYTE *)&m4, sizeof(m4));
 +                    m._11 = m4._11; m._12 = m4._12; m._21 = m4._21; m._22 = m4._22;
 +                    m._31 = m4._41; m._32 = m4._42;
-+                    if (0) fprintf(stderr, "YMM4DIAG: 4x4 hr=%#lx .11=%.3f .12=%.3f .21=%.3f .22=%.3f .41=%.3f .42=%.3f .14=%.3f .24=%.3f .44=%.3f\n",
++                    if (YMM4DIAG) fprintf(stderr, "YMM4DIAG: 4x4 hr=%#lx .11=%.3f .12=%.3f .21=%.3f .22=%.3f .41=%.3f .42=%.3f .14=%.3f .24=%.3f .44=%.3f\n",
 +                            (unsigned long)ghr, m4._11, m4._12, m4._21, m4._22, m4._41, m4._42, m4._14, m4._24, m4._44); fflush(stderr);
 +                }
-+                if (0) fprintf(stderr, "YMM4DIAG: 2x2 hr=%#lx m=%.3f %.3f %.3f %.3f %.3f %.3f\n",
++                if (YMM4DIAG) fprintf(stderr, "YMM4DIAG: 2x2 hr=%#lx m=%.3f %.3f %.3f %.3f %.3f %.3f\n",
 +                        (unsigned long)(IsEqualGUID(&id, &clsid_2daffine) ? ghr : 0), m._11, m._12, m._21, m._22, m._31, m._32); fflush(stderr);
 +                ID2D1RenderTarget_GetTransform(rt, &old_transform);
 +                {
@@ -1099,7 +1482,7 @@ index 552d6d4..eadd63f 100644
 +                    combined._22 = m._21 * old_transform._12 + m._22 * old_transform._22;
 +                    combined._31 = m._31 * old_transform._11 + m._32 * old_transform._21 + old_transform._31;
 +                    combined._32 = m._31 * old_transform._12 + m._32 * old_transform._22 + old_transform._32;
-+                    if (0) fprintf(stderr, "YMM4DIAG: transform (%s) applied\n", debugstr_guid(&id)); fflush(stderr);
++                    if (YMM4DIAG) fprintf(stderr, "YMM4DIAG: transform (%s) applied\n", debugstr_guid(&id)); fflush(stderr);
 +                    ID2D1RenderTarget_SetTransform(rt, &combined);
 +                    /* YMM4: command lists record absolute transforms and would clobber
 +                     * the CTM above, so also fold the effect matrix into replay. */
@@ -1117,7 +1500,7 @@ index 552d6d4..eadd63f 100644
 +                    if (v4.x > -1.0e7f && v4.y > -1.0e7f && v4.z < 1.0e7f && v4.w < 1.0e7f)
 +                    {
 +                        clip_rect.left = v4.x; clip_rect.top = v4.y; clip_rect.right = v4.z; clip_rect.bottom = v4.w;
-+                        if (0) fprintf(stderr, "YMM4DIAG: crop (%.1f,%.1f)-(%.1f,%.1f)\n", v4.x, v4.y, v4.z, v4.w); fflush(stderr);
++                        if (YMM4DIAG) fprintf(stderr, "YMM4DIAG: crop (%.1f,%.1f)-(%.1f,%.1f)\n", v4.x, v4.y, v4.z, v4.w); fflush(stderr);
 +                        ID2D1RenderTarget_PushAxisAlignedClip(rt, &clip_rect, D2D1_ANTIALIAS_MODE_ALIASED);
 +                        have_clip = TRUE;
 +                    }
@@ -1168,7 +1551,7 @@ index 552d6d4..eadd63f 100644
      FIXME("Unhandled image %p.\n", image);
  }
  
-@@ -2771,6 +3625,12 @@ static void STDMETHODCALLTYPE d2d_device_context_ID2D1DeviceContext_DrawBitmap(I
+@@ -2771,6 +3754,12 @@ static void STDMETHODCALLTYPE d2d_device_context_ID2D1DeviceContext_DrawBitmap(I
              "src_rect %s, perspective_transform %p.\n",
              iface, bitmap, debug_d2d_rect_f(dst_rect), opacity, interpolation_mode,
              debug_d2d_rect_f(src_rect), perspective_transform);
